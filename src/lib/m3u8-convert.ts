@@ -23,9 +23,12 @@ export async function m3u8Convert(options: M3u8DLOptions, data: TsItemInfo[]) {
     // 在合并前，遍历所有 TS 文件进行头部检测和修复
     // 必须在 filter existsSync 之后或之中做，防止读不到文件
     data.forEach(d => {
-      if (existsSync(d.tsOut)) {
-        // 执行修复，这是同步操作，会直接修改磁盘上的文件
-        checkAndRepairTsFile(d.tsOut);
+      if (existsSync(d.tsOut) && d.tsOut.toLowerCase().endsWith('.ts')) {
+        try {
+          checkAndRepairTsFile(d.tsOut);
+        } catch (err) {
+          logger.error(`Repair failed for file: ${d.tsOut}`, err);
+        }
       }
     });
     // === 新增逻辑结束 ===

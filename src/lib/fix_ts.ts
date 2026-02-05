@@ -1,5 +1,4 @@
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { logger } from './utils';
 /**
  * 检测并修复 TS 文件头 (去除图片伪装头或修复丢失的同步字节)
@@ -80,7 +79,7 @@ export function checkAndRepairTsFile(filepath: string): boolean {
 /**
  * 遍历文件夹并修复
  */
-function repairDirectory(dirPath: string) {
+/*function repairDirectory(dirPath: string) {
   logger.debug(`📂 开始扫描目录: ${dirPath}`);
 
   const files = readdirSync(dirPath);
@@ -108,10 +107,8 @@ function repairDirectory(dirPath: string) {
   logger.debug(`无需修复数量: ${totalFiles - repairedCount}`);
   logger.debug('---------------');
 }
-
-function main() {
-  const targetDir = 'C:\\Users\\1008\\Desktop\\ts';
-  repairDirectory(targetDir);
-}
-
-main();
+ function main() {
+   const targetDir = 'C:\\Users\\1008\\Desktop\\ts';
+   repairDirectory(targetDir);
+ }
+ main();*/
