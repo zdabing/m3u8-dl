@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { execSync, formatByteSize, mkdirp } from '@lzwme/fe-utils';
 import { cyan, greenBright, magentaBright } from 'console-log-colors';
 import type { M3u8DLOptions, TsItemInfo } from '../types/m3u8';
+import { checkAndRepairTsFile } from './fix_ts';
 import { isSupportFfmpeg, logger } from './utils';
 
 export async function m3u8Convert(options: M3u8DLOptions, data: TsItemInfo[]) {
@@ -18,6 +19,16 @@ export async function m3u8Convert(options: M3u8DLOptions, data: TsItemInfo[]) {
   mkdirp(dirname(filepath));
 
   if (ffmpegSupport) {
+    // === 新增逻辑开始 ===
+    // 在合并前，遍历所有 TS 文件进行头部检测和修复
+    // 必须在 filter existsSync 之后或之中做，防止读不到文件
+    data.forEach(d => {
+      if (existsSync(d.tsOut)) {
+        // 执行修复，这是同步操作，会直接修改磁盘上的文件
+        checkAndRepairTsFile(d.tsOut);
+      }
+    });
+    // === 新增逻辑结束 ===
     const ffconcatFile = resolve(dirname(data[0].tsOut), 'ffconcat.txt');
     let filesAllArr = data.filter(d => existsSync(d.tsOut)).map(d => `file '${d.tsOut}'\nduration ${d.duration}`);
 

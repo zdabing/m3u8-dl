@@ -275,7 +275,7 @@ export async function m3u8Download(url: string, options: M3u8DLOptions = {}) {
             if (typeof info.success !== 'number') info.success = 0;
             else info.success--;
 
-            if (info.success >= -3) {
+            if (info.success >= -10) {
               logger.warn(t('download.status.retryTimes', lang, { times: info.success }), info.index, info.uri);
               setTimeout(() => runTask([info]), 1000);
               return;
