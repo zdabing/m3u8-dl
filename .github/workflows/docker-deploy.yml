@@ -11,7 +11,7 @@ on:
 
 env:
   # 使用 github.repository 作为镜像名称，格式为 <account>/<repo>
-  IMAGE_NAME: renxia/m3u8-dl  # DockerHub 镜像名称
+  IMAGE_NAME: wzbsdb/m3u8-fix # DockerHub 镜像名称
   IMAGE_NAME_REPO: ${{ github.repository }}  # GitHub Container Registry 镜像名称
 
 jobs:
