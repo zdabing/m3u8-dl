@@ -1,19 +1,13 @@
 services:
   web:
-    image: renxia/m3u8-dl:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - '6600:6600'
     volumes:
       - ./downloads:/app/downloads
       - ./cache:/app/cache
-    ports:
-      - '6600:6600'
     environment:
-      DS_PORT: '6600'
-      DS_SAVE_DIR: '/app/downloads'
-      DS_CACHE_DIR: '/app/cache'
-      DS_SECRET: '' # 设置访问密码
-      DS_DEBUG: ''
-      DS_LIMTE_FILE_ACCESS: '1'
-      DS_FFMPEG_PATH: ''
-    # command: >
-    #   sh -c "node cjs/server/index.js"
+      DS_SECRET: '' # 可设置访问密码
     restart: unless-stopped

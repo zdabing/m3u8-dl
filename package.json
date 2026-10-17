@@ -1,7 +1,7 @@
 {
   "name": "@lzwme/m3u8-dl",
   "version": "1.10.0",
-  "description": "A free, open-source, and powerful m3u8 video batch downloader with multi-threaded downloading, play-while-downloading, WebUI management, video parsing, and more.",
+  "description": "Lightweight M3U8 batch downloader with resumable downloads, mobile WebUI and lossless merging.",
   "main": "cjs/index.js",
   "types": "cjs/index.d.ts",
   "license": "MIT",
@@ -16,31 +16,19 @@
     "url": "https://lzw.me"
   },
   "scripts": {
-    "prepare": "husky || true",
     "dev": "concurrently \"pnpm dev:sdk\" \"pnpm dev:server\" \"pnpm dev:frontend\"",
     "dev:sdk": "tsc -p tsconfig.cjs.json --watch",
+    "dev:server": "node --watch cjs/server/index.js",
     "dev:frontend": "pnpm -F @lzwme/m3u8-dl-frontend dev",
-    "dev:app": "pnpm -F @lzwme/m3u8-dl-app dev",
-    "dev:server": "nodemon bin/m3u8dl.js server --debug",
-    "lint:flh": "flh --tscheck --prettier",
-    "lint": "biome lint",
-    "lint:all": "biome lint && pnpm -F @lzwme/m3u8-capture lint && pnpm -F @lzwme/m3u8-dl-frontend lint",
-    "format": "biome format --write",
-    "fix": "biome check --fix",
-    "fix:all": "biome check --fix && pnpm -F @lzwme/m3u8-capture fix && pnpm -F @lzwme/m3u8-dl-frontend fix && pnpm -F @lzwme/m3u8-dl-portal fix",
-    "build": "npm run clean && npm run build:cjs && npm run build:frontend && npm run build:capture",
+    "start": "node cjs/server/index.js",
+    "build": "pnpm clean && pnpm build:cjs && pnpm build:frontend",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "build:frontend": "pnpm -F @lzwme/m3u8-dl-frontend build",
-    "build:capture": "pnpm -F @lzwme/m3u8-capture build",
-    "download-cdn": "node scripts/download-cdn-resources.js",
-    "doc": "pnpm doc:api && pnpm doc:portal",
-    "doc:api": "typedoc src --tsconfig tsconfig.module.json",
-    "doc:portal": "pnpm -F @lzwme/m3u8-dl-portal build",
-    "version": "standard-version",
-    "dist": "npm run build",
-    "release": "npm run dist && npm run version",
-    "clean": "flh rm -f ./cjs ./esm ./docs ./client/assets",
-    "test": "npm run lint:all"
+    "clean": "node scripts/clean.cjs",
+    "lint": "biome lint",
+    "lint:all": "pnpm lint && pnpm -F @lzwme/m3u8-dl-frontend lint",
+    "test": "pnpm build:cjs && node --test test/*.test.cjs",
+    "typecheck": "pnpm build:cjs && pnpm -F @lzwme/m3u8-dl-frontend typecheck"
   },
   "bin": {
     "m3u8dl": "bin/m3u8dl.js"
@@ -53,7 +41,7 @@
     "ffmpeg"
   ],
   "engines": {
-    "node": ">=14.18"
+    "node": ">=22.12"
   },
   "publishConfig": {
     "access": "public",
@@ -61,40 +49,26 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
-    "@lzwme/fed-lint-helper": "^2.6.6",
     "@types/express": "^5.0.6",
     "@types/global-agent": "^3.0.0",
     "@types/m3u8-parser": "^7.2.6",
     "@types/node": "^26.4.1",
     "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",
-    "express": "^5.2.1",
-    "fast-glob": "^3.3.3",
-    "husky": "^9.1.7",
-    "minimist": "^1.2.8",
-    "nodemon": "^3.1.14",
-    "prettier": "^3.9.6",
-    "standard-version": "^9.5.0",
-    "typedoc": "^0.28.20",
-    "typescript": "^6",
-    "ws": "^8.21.3"
+    "typescript": "^6"
   },
   "dependencies": {
-    "@lzwme/fe-utils": "^1.9.2",
     "commander": "^12.0.0",
-    "console-log-colors": "^0.5.0",
-    "enquirer": "^2.4.1",
     "global-agent": "^4.1.3",
-    "m3u8-parser": "^7.2.0"
+    "m3u8-parser": "^7.2.0",
+    "express": "^5.2.1",
+    "ws": "^8.21.3"
   },
   "files": [
     "cjs",
-    "client/",
-    "src/types/contract.ts",
-    "!client/ariang",
-    "!client/local",
-    "!cjs/type.js",
-    "!cjs/cli.d.ts",
-    "bin"
+    "client/index.html",
+    "client/assets",
+    "bin",
+    "src/types/contract.ts"
   ]
 }

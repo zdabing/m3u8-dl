@@ -1,135 +1,178 @@
-import { existsSync, readdirSync, type Stats, statSync } from 'node:fs';
-import { access, constants } from 'node:fs/promises';
-import type { OutgoingHttpHeaders } from 'node:http';
-import { resolve } from 'node:path';
-import { color, execSync, NLogger, Request, retry, toLowcaseKeyObject } from '@lzwme/fe-utils';
+import { createHash } from 'node:crypto';
+import { access } from 'node:fs/promises';
+import http, { type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http';
+import https from 'node:https';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { M3u8ByteRange } from '../types/m3u8.js';
 
-export const request = new Request({
-  headers: { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-  reqOptions: { rejectUnauthorized: false },
-});
-
-/** 判断 HTTP 状态码是否成功。使用 Range 请求(byte-range 分片)时服务端通常返回 206 */
-export function isOkStatus(statusCode?: number) {
-  return typeof statusCode === 'number' && statusCode >= 200 && statusCode < 300;
+export const md5 = (value: string) => createHash('md5').update(value).digest('hex');
+export const logger = {
+  debug: (...args: unknown[]) => {
+    if (process.env.DS_DEBUG === '1') console.debug(...args);
+  },
+  info: (...args: unknown[]) => console.info(...args),
+  warn: (...args: unknown[]) => console.warn(...args),
+  error: (...args: unknown[]) => console.error(...args),
+};
+export function formatByteSize(bytes = 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3);
+  return `${(bytes / 1024 ** i).toFixed(i ? 1 : 0)} ${['B', 'KB', 'MB', 'GB'][i]}`;
 }
-
-/**
- * 追加 Range 请求头，用于支持 `EXT-X-BYTERANGE` 字节区间寻址的分片
- */
-export function withRangeHeader(headers: OutgoingHttpHeaders | string | undefined, byterange?: M3u8ByteRange) {
-  if (!byterange?.length) return headers;
-
-  const offset = byterange.offset ?? 0;
-  return { ...formatHeaders(headers as OutgoingHttpHeaders), range: `bytes=${offset}-${offset + byterange.length - 1}` };
-}
-
-/**
- * 按字节区间截取数据。
- * 部分服务端会忽略 Range 请求并返回完整文件，此时需要按偏移量截取
- */
-export function sliceByterange<T extends Buffer>(buffer: T, byterange?: M3u8ByteRange): Buffer {
-  if (!byterange?.length || buffer.byteLength <= byterange.length) return buffer;
-
-  const offset = byterange.offset ?? 0;
-  return buffer.subarray(offset, offset + byterange.length);
-}
-
-// process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-export const getRetry = <T = string>(url: string, headers?: OutgoingHttpHeaders | string, retries = 3) =>
-  retry(
-    () => request.get<T>(url, null, formatHeaders(headers), { rejectUnauthorized: false }),
-    1000,
-    retries,
-    r => {
-      if (!isOkStatus(r.response.statusCode)) {
-        console.log();
-        logger.warn(`[retry][${url}][${r.response.statusCode}]`, r.response.statusMessage || r.data);
-        // throw Error(`[${r.response.statusCode}]${r.response.statusMessage || r.data}`);
-      }
-
-      return isOkStatus(r.response.statusCode);
-    }
-  );
-
-export const logger = NLogger.getLogger('[M3U8-DL]', { color });
-
-const ffmpegTestCache: Record<string, boolean> = {};
-export function isSupportFfmpeg(ffmpegBin: string) {
-  if (!(ffmpegBin in ffmpegTestCache)) ffmpegTestCache[ffmpegBin] = execSync(`${ffmpegBin} -version`).stderr === '';
-  return ffmpegTestCache[ffmpegBin];
-}
-
-export function findFiles(apidir?: string, validate?: (filepath: string, stat: Stats) => boolean) {
-  const files: string[] = [];
-
-  if (apidir && existsSync(apidir)) {
-    const stat = statSync(apidir);
-
-    if (!validate || validate(apidir, stat)) {
-      if (stat.isFile()) {
-        files.push(resolve(apidir));
-      } else if (stat.isDirectory()) {
-        for (const filename of readdirSync(apidir)) {
-          files.push(...findFiles(resolve(apidir, filename)));
-        }
-      }
-    }
-  }
-
-  return files;
-}
-
-/** 获取重定向后的 URL */
-export async function getLocation(url: string, method = 'HEAD'): Promise<string> {
-  const { res } = await request.req(url, null, { method, headers: { 'content-type': 'text/html' } }, false);
-  const rurl = res.headers.location || res.headers['x-redirect'] || res.headers['x-location'];
-  if (typeof rurl === 'string' && rurl !== url) return getLocation(rurl, method);
-  return url;
-}
-
-/**
- * 将传入的 headers 转换为统一的小写键对象格式
- * 如果 headers 是字符串，会先将其解析为对象；如果 headers 为空，则返回空对象。
- */
-export function formatHeaders(headers: string | OutgoingHttpHeaders) {
-  if (!headers) return {};
-
-  if (typeof headers === 'string') {
-    headers = headers.trim();
-    if (headers.startsWith('{') && headers.endsWith('}')) {
-      try {
-        headers = JSON.parse(headers);
-      } catch (e) {
-        console.error('解析 headers 失败:', e);
-      }
-    }
-
-    if (typeof headers === 'string') {
-      const parsed: Record<string, string> = {};
-      headers
-        .replace(/,\s*([a-zA-Z0-9_-]+:)/g, '\n$1') // 支持如 "Key1: Val1, Key2: Val2" 的格式
-        .split('\n')
-        .forEach(line => {
-          const idx = line.indexOf(':');
-          if (idx > 0) parsed[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-        });
-      headers = parsed;
-    }
-  }
-
-  return toLowcaseKeyObject(headers as Record<string, string>);
-}
-
-/** 异步检查文件是否存在 */
-export async function checkFileExists(filepath: string) {
+export async function checkFileExists(path?: string) {
+  if (!path) return false;
   try {
-    if (!filepath) return false;
-    await access(filepath, constants.F_OK);
+    await access(path);
     return true;
-  } catch (error) {
-    logger.debug('checkFileExists failed:', filepath, (error as Error).message);
+  } catch {
     return false;
+  }
+}
+export const isOkStatus = (status?: number) => status != null && status >= 200 && status < 300;
+
+export function normalizeDownloadUrl(value: string) {
+  const clean = value.trim().replace(/\\([_,])/g, '$1');
+  if (!/^https?:\/\//i.test(clean)) throw new Error('请输入以 http:// 或 https:// 开头的 M3U8 链接');
+  const url = new URL(clean);
+  if (url.username || url.password) throw new Error('请通过请求头填写认证信息');
+  return url.href;
+}
+export function formatHeaders(input?: OutgoingHttpHeaders | string): OutgoingHttpHeaders {
+  if (!input) return {};
+  let headers: OutgoingHttpHeaders;
+  if (typeof input === 'string') {
+    const text = input.trim();
+    if (text.startsWith('{')) headers = JSON.parse(text);
+    else {
+      headers = {};
+      for (const line of text.replace(/,\s*([a-zA-Z0-9_-]+:)/g, '\n$1').split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const index = line.indexOf(':');
+        if (index < 1) throw new Error('请求头请使用「名称: 值」格式，每行一项，或填写 JSON 对象');
+        headers[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+      }
+    }
+  } else headers = input;
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) throw new Error('请求头必须是对象');
+  const result: OutgoingHttpHeaders = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const name = key.trim().toLowerCase();
+    if (name.startsWith(':') || ['host', 'content-length', 'connection', 'accept-encoding'].includes(name)) continue;
+    if (!/^[!#$%&'*+.^_`|~\w-]+$/.test(name) || /[\r\n]/.test(String(value))) throw new Error(`无效的请求头: ${name}`);
+    if (value != null) result[name] = value;
+  }
+  return result;
+}
+export function buildRequestHeaders(url: string, input?: OutgoingHttpHeaders | string) {
+  const custom = formatHeaders(input);
+  const headers: OutgoingHttpHeaders = {
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/132.0.0.0 Safari/537.36',
+    accept: '*/*',
+    referer: `${new URL(url).origin}/`,
+    ...custom,
+  };
+  // An explicitly empty Referer disables the automatic value.
+  if (!headers.referer) delete headers.referer;
+  return headers;
+}
+export function withRangeHeader(headers: OutgoingHttpHeaders | string | undefined, range?: M3u8ByteRange) {
+  if (!range?.length) return headers;
+  const offset = range.offset ?? 0;
+  return { ...formatHeaders(headers), range: `bytes=${offset}-${offset + range.length - 1}` };
+}
+export function sliceByterange(buffer: Buffer, range?: M3u8ByteRange, statusCode = 200): Buffer {
+  if (!range?.length || statusCode === 206) return buffer;
+  const offset = range.offset ?? 0;
+  return buffer.subarray(offset, offset + range.length);
+}
+interface HttpResult<T> {
+  url: string;
+  buffer: Buffer;
+  data: T;
+  response: { statusCode: number; statusMessage: string; headers: IncomingHttpHeaders };
+}
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    url: string
+  ) {
+    super(`HTTP ${status}: ${url}${[401, 403, 404].includes(status) ? '（请检查链接有效期、来源页 Referer 或 Cookie）' : ''}`);
+  }
+}
+async function requestOnce(
+  url: string,
+  headers: OutgoingHttpHeaders,
+  signal?: AbortSignal,
+  redirects = 0,
+  progress?: (bytes: number) => void
+): Promise<HttpResult<string>> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = (parsed.protocol === 'https:' ? https : http).get(parsed, { headers, signal, timeout: 30_000 }, res => {
+      res.once('error', reject);
+      res.once('aborted', () => reject(new Error('远端提前关闭响应，请重试')));
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        if (redirects >= 5) {
+          reject(new Error('重定向次数过多'));
+          return;
+        }
+        const target = new URL(res.headers.location, url);
+        const forwarded = { ...headers };
+        if (target.origin !== parsed.origin) {
+          delete forwarded.cookie;
+          delete forwarded.authorization;
+        }
+        requestOnce(target.href, forwarded, signal, redirects + 1, progress).then(resolve, reject);
+        return;
+      }
+      if (!isOkStatus(res.statusCode)) {
+        res.resume();
+        reject(new HttpError(res.statusCode, url));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        progress?.(size);
+        if (size > 128 * 1024 * 1024) {
+          res.destroy(new Error('单个分片超过 128 MB 限制'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.once('end', () => {
+        const buffer = Buffer.concat(chunks);
+        resolve({
+          url,
+          buffer,
+          data: buffer.toString('utf8'),
+          response: { statusCode: res.statusCode, statusMessage: res.statusMessage, headers: res.headers },
+        });
+      });
+    });
+    req.once('timeout', () => req.destroy(new Error('请求超过 30 秒未响应')));
+    req.once('error', reject);
+  });
+}
+export async function getRetry<T = string>(
+  url: string,
+  headers?: OutgoingHttpHeaders | string,
+  retries = 3,
+  signal?: AbortSignal,
+  progress?: (bytes: number) => void
+): Promise<HttpResult<T>> {
+  const normalized = normalizeDownloadUrl(url);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      progress?.(0);
+      return (await requestOnce(normalized, buildRequestHeaders(normalized, headers), signal, 0, progress)) as unknown as HttpResult<T>;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (attempt >= retries - 1 || (error instanceof HttpError && error.status < 500 && error.status !== 429)) throw error;
+      await delay(Math.min(500 * 2 ** attempt, 3000), undefined, { signal });
+    }
   }
 }

@@ -1,6 +1,4 @@
-import type { IncomingHttpHeaders } from 'node:http';
-import type { AnyObject, DownloadResult } from '@lzwme/fe-utils';
-import type { WorkerPool } from '../lib/worker_pool';
+import type { OutgoingHttpHeaders } from 'node:http';
 import type { DownloadStats } from './contract.js';
 
 /**
@@ -51,6 +49,8 @@ export interface TsItemInfo {
   uri: string;
   /** 如果 ts 使用了加密算法，加密 key 的获取 uri */
   keyUri?: string;
+  /** Per-segment IV, including the media sequence default. */
+  iv?: Uint8Array;
   /** ts 文件下载保存路径 */
   tsOut: string;
   /** 字节区间。来源于 `EXT-X-BYTERANGE`，表示该分片位于 url 对应文件的指定字节区间 */
@@ -77,7 +77,7 @@ export interface M3u8Info {
   /** ts 文件列表 */
   data: TsItemInfo[];
   /** m3u8 文件信息 */
-  manifest: AnyObject;
+  manifest: object;
   /**
    * 初始化段信息(`EXT-X-MAP`)。
    * fMP4(m4s) 类型的分片必须依赖初始化段才能正确解码与合并
@@ -140,24 +140,22 @@ export interface M3u8DLProgressStats extends DownloadStats {
   url: string;
 }
 
-export type M3u8WorkerPool = WorkerPool<WorkerTaskInfo, { success: boolean; info: TsItemInfo; timeCost: number }>;
-
 export interface M3u8DLOptions {
+  /** Retry only indices recorded as failed, without requesting completed media segments. */
+  retryFailedOnly?: boolean;
+  signal?: AbortSignal;
+  /** Maximum time without merge progress, in seconds. */
+  mergeTimeout?: number;
+  onMergeProgress?: (progress: number, message: string) => void;
   debug?: boolean;
   /** 是否显示内置的进度信息。默认为 true */
   showProgress?: boolean;
   /** 当初始化完成、下载开始时回调 */
-  onInited?: (stats: M3u8DLProgressStats, m3u8Info: M3u8Info, workPoll: M3u8WorkerPool) => void;
+  onInited?: (stats: M3u8DLProgressStats, m3u8Info: M3u8Info, signal: AbortSignal) => void;
   /** 每当 ts 文件下载完成时回调，可用于自定义进度控制 */
   onProgress?: (finished: number, total: number, currentInfo: TsItemInfo, stats: M3u8DLProgressStats) => void | boolean;
-  /** 下载完成时回调，主要用于内部多任务管理 */
-  onComplete?: (result: M3u8DLResult) => void;
-  /** 并发下载线程数。取决于服务器限制，过多可能会容易下载失败。一般建议不超过 8 个。默认为 cpu数 * 2，但不超过 8 */
+  /** 并发分片请求数，默认 4，上限 16 */
   threadNum?: number;
-  /** 最大并发下载任务数 */
-  maxDownloads?: number;
-  /** 下载优先级，数字越大优先级越高 */
-  priority?: number;
   /** 要保存的文件名(路径) */
   filename?: string;
   /** 下载文件保存的路径。默认为当前目录 */
@@ -171,18 +169,9 @@ export interface M3u8DLOptions {
   /** 文件已存在时是否仍强制下载和生成。默认为 false，文件已存在则跳过 */
   force?: boolean;
   /** 下载 m3u8、ts 等文件时自定义请求 headers */
-  headers?: IncomingHttpHeaders | string;
-  /** 下载时是否启动本地资源播放（边下边看） */
-  play?: boolean;
+  headers?: OutgoingHttpHeaders | string;
   /** 下载完毕后，是否合并转换为 mp4 或 ts 文件。默认为 true */
   convert?: boolean;
-  /**
-   * 下载类型。默认自动识别
-   * - 'm3u8'：下载 m3u8 文件
-   * - 'file'：下载普通文件
-   * - 'parser'：下载 VideoParser 支持解析的平台视频文件
-   */
-  type?: 'm3u8' | 'file' | 'parser';
   /** ffmpeg 可执行文件路径。如果未指定，则尝试使用系统 PATH 中的 'ffmpeg' */
   ffmpegPath?: string;
   /** 语言。可选值：zh-CN, en */
@@ -195,24 +184,17 @@ export interface M3u8DLOptions {
   noProxy?: string;
 }
 
-export interface M3u8DLResult extends Partial<DownloadResult> {
+export interface M3u8DLResult {
+  filepath?: string;
+  errmsg?: string;
+  isExist?: boolean;
+  paused?: boolean;
   /** 下载进度统计 */
   stats?: M3u8DLProgressStats;
   /** 下载选项 */
   options?: M3u8DLOptions;
   /** m3u8 文件信息 */
   m3u8Info?: M3u8Info;
-}
-
-export interface WorkerTaskInfo {
-  /** m3u8 文件地址 */
-  url: string;
-  /** ts 文件信息 */
-  info: TsItemInfo;
-  /** 加密相关信息 */
-  crypto: M3u8Crypto;
-  /** 下载选项 */
-  options: M3u8DLOptions;
 }
 
 export interface CliOptions extends M3u8DLOptions {

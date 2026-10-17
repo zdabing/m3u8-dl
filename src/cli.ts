@@ -1,121 +1,48 @@
-import { resolve } from 'node:path';
-import { type PackageJson, readJsonFileSync } from '@lzwme/fe-utils';
 import { program } from 'commander';
-import { cyanBright } from 'console-log-colors';
-import { getLang, setLanguage, t } from './lib/i18n.js';
-import { logger } from './lib/utils.js';
-import { VideoSerachAndDL } from './lib/video-search.js';
-import { m3u8BatchDownload } from './m3u8-batch-download';
-import type { CliOptions } from './types/m3u8';
-import { VideoParser } from './video-parser/index.js';
+import { m3u8BatchDownload } from './m3u8-batch-download.js';
+import type { M3u8DLOptions } from './types/m3u8.js';
 
-const pkg = readJsonFileSync<PackageJson>(resolve(__dirname, '../package.json'));
-
-process.on('unhandledRejection', r => {
-  console.error(r);
-  const lang = getLang();
-  logger.info(`[${t('common.exit', lang)}][unhandledRejection]`, (r as Error).message);
-  process.exit();
-});
-
-process.on('SIGINT', signal => {
-  const lang = getLang();
-  logger.info(`[SIGINT]${t('common.exit', lang)}`, signal);
-  process.exit();
-});
-
-// Initialize language before using t()
-const initialLang = 'en'; // getLang();
-setLanguage(initialLang);
-
+program.name('m3u8dl').description('M3U8 下载与无损合并').version('1.10.0');
 program
-  .version(pkg.version, '-v, --version')
-  .description(cyanBright(pkg.description))
-  .argument('<m3u8Urls...>', t('cli.command.download.description', initialLang))
-  .option('--silent', t('cli.option.silent', initialLang))
-  .option('--debug', t('cli.option.debug', initialLang))
-  .option('-f, --filename <name>', t('cli.option.filename', initialLang))
-  .option('-n, --thread-num <number>', t('cli.option.threadNum', initialLang))
-  .option('-F, --force', t('cli.option.force', initialLang))
-  .option('--no-progress', t('cli.option.noProgress', initialLang))
-  .option('-p, --play', t('cli.option.play', initialLang))
-  .option('-C, --cache-dir <dirpath>', t('cli.option.cacheDir', initialLang))
-  .option('-S, --save-dir <dirpath>', t('cli.option.saveDir', initialLang))
-  .option('--no-del-cache', t('cli.option.noDelCache', initialLang))
-  .option('--no-convert', t('cli.option.noConvert', initialLang))
-  .option('--ffmpeg-path <path>', t('cli.option.ffmpegPath', initialLang))
-  .option('-H, --headers <headers>', t('cli.option.headers', initialLang))
-  .option('-T, --type <type>', t('cli.option.type', initialLang))
-  .option('-I, --ignore-segments <time-segments>', t('cli.option.ignoreSegments', initialLang))
-  .option('--lang <lang>', t('cli.option.lang', initialLang))
-  .action(async (urls: string[]) => {
-    const options = getOptions();
-    logger.debug(urls, options);
-    if (options.progress != null) options.showProgress = options.progress;
-    delete options.progress;
-
-    if (urls.length > 0) {
-      await m3u8BatchDownload(urls, options).then(r => process.exit(r ? 0 : 1));
-    } else program.help();
+  .argument('[urls...]', 'M3U8 链接（也支持 .txt 等伪装后缀）')
+  .option('-f, --filename <name>', '保存文件名')
+  .option('-S, --save-dir <dir>', '保存目录', './downloads')
+  .option('-C, --cache-dir <dir>', '分片缓存目录', './cache')
+  .option('-n, --thread-num <number>', '并发分片数', value => Number(value), 4)
+  .option('-H, --headers <headers>', '请求头：每行名称: 值或 JSON')
+  .option('--no-del-cache', '合并成功后保留分片缓存')
+  .option('--ffmpeg-path <path>', 'FFmpeg 可执行文件路径')
+  .action(async (urls: string[], options: M3u8DLOptions) => {
+    if (!urls.length) {
+      program.help();
+      return;
+    }
+    const controller = new AbortController();
+    process.once('SIGINT', () => controller.abort());
+    try {
+      process.exitCode = (await m3u8BatchDownload(urls, { ...options, signal: controller.signal })) ? 0 : 1;
+    } catch (error) {
+      console.error((error as Error).message);
+      process.exitCode = 1;
+    }
   });
-
 program
   .command('server')
-  .description(t('cli.command.server.description', initialLang))
-  .option('-P, --port <port>', t('cli.option.port', initialLang))
-  .option('-t, --token <token>', t('cli.option.token', initialLang))
-  .option('--lang <lang>', t('cli.option.lang', initialLang))
-  .action((options: { port?: number; token?: string; debug?: boolean; cacheDir?: string }) => {
-    const opts = getOptions();
-    if (opts.debug) options.debug = true;
-    if (opts.cacheDir) options.cacheDir = opts.cacheDir;
-    logger.debug('[cli][server]', opts, options);
-
-    import('./server/download-server.js').then(m => {
-      new m.DLServer(options);
+  .description('启动 Web 下载器')
+  .option('-P, --port <port>', '服务端口', value => Number(value), 6600)
+  .option('-t, --token <token>', '访问密码')
+  .action(async (options: { port: number; token?: string }) => {
+    const { DLServer } = await import('./server/download-server.js');
+    const server = new DLServer(options);
+    await server.ready;
+    process.once('SIGINT', () => {
+      void server.close();
+    });
+    process.once('SIGTERM', () => {
+      void server.close();
     });
   });
-
-program
-  .command('search [keyword]')
-  .alias('s')
-  .option('-u,--url <api...>', t('cli.option.url', initialLang))
-  .option('-d, --apidir <dirpath>', t('cli.option.apidir', initialLang))
-  .option('--lang <lang>', t('cli.option.lang', initialLang))
-  // .option('-R,--remote-config-url <url>', '自定义远程配置加载地址。默认从主仓库配置读取')
-  .description(t('cli.command.search.description', initialLang))
-  .action(async (keyword, options: { url?: string[]; remoteConfigUrl?: string }) => {
-    await VideoSerachAndDL(keyword, options, getOptions());
-  });
-
-program
-  .command('info <url>')
-  .description('解析视频 URL 并输出详细信息')
-  .option('--lang <lang>', t('cli.option.lang', initialLang))
-  .action(async (url: string) => {
-    getOptions(); // 处理语言设置
-    logger.info('正在解析视频 URL:', url);
-    const result = await VideoParser.parse(url);
-    console.log(JSON.stringify(result, null, 2));
-    process.exit();
-  });
-
-program.parse(process.argv);
-
-function getOptions() {
-  const options = program.opts<CliOptions & { lang?: string }>();
-
-  // Set global language if specified
-  if (options.lang) {
-    setLanguage(getLang(options.lang));
-  }
-
-  if (options.debug) {
-    logger.updateOptions({ levelType: 'debug' });
-  } else if (options.silent) {
-    logger.updateOptions({ levelType: 'silent' });
-    options.progress = false;
-  }
-
-  return options;
-}
+void program.parseAsync().catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

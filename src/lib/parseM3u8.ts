@@ -1,12 +1,12 @@
 import { existsSync, promises, statSync } from 'node:fs';
 import type { OutgoingHttpHeaders } from 'node:http';
 import { dirname, resolve } from 'node:path';
-import { md5, mkdirp } from '@lzwme/fe-utils';
+
 import { Parser } from 'm3u8-parser';
-import type { M3u8ContainerType, M3u8Crypto, M3u8Info, M3u8MapInfo, TsItemInfo } from '../types/m3u8';
-import { detectContainerByFile, detectContainerByHeader, detectContainerType, getSegmentExt } from './container';
-import { decryptSegmentData } from './crypto';
-import { getRetry, isOkStatus, logger, sliceByterange, withRangeHeader } from './utils';
+import type { M3u8ContainerType, M3u8Info, M3u8MapInfo, TsItemInfo } from '../types/m3u8.js';
+import { detectContainerByFile, detectContainerByHeader, detectContainerType, getSegmentExt } from './container.js';
+import { decryptSegmentData } from './crypto.js';
+import { getRetry, isOkStatus, logger, md5, sliceByterange, withRangeHeader } from './utils.js';
 
 /** m3u8-parser 未完整导出 EXT-X-MAP 上的 key 信息，这里做类型补全 */
 type MapInfoRaw = { uri: string; byterange?: { length: number; offset: number }; key?: { method: string; uri: string; iv?: unknown } };
@@ -16,20 +16,19 @@ type MapInfoRaw = { uri: string; byterange?: { length: number; offset: number };
  * @param content m3u8 文件的内容，可为 http 远程地址、本地文件路径
  * @param cacheDir 缓存文件保存目录
  */
-export async function parseM3U8(content: string, cacheDir = './cache', headers?: OutgoingHttpHeaders | string) {
+export async function parseM3U8(content: string, cacheDir = './cache', headers?: OutgoingHttpHeaders | string, signal?: AbortSignal) {
   let url = process.cwd();
 
-  if (content.startsWith('http')) {
-    url = content;
-    content = (await getRetry<string>(url, headers)).data;
+  if (/^https?:\/\//i.test(content)) {
+    const response = await getRetry<string>(content, headers, 3, signal);
+    url = response.url;
+    content = response.data;
   } else if (!content.includes('\n') && existsSync(content)) {
     url = resolve(process.cwd(), content);
     content = await promises.readFile(url, 'utf8');
   }
 
-  if (!content) {
-    logger.error('获取播放列表为空！', url);
-  }
+  if (!content?.trim().startsWith('#EXTM3U')) throw new Error('响应不是有效的 M3U8 播放列表，请检查链接和请求头');
 
   logger.debug('starting parsing m3u8 file:', url);
 
@@ -38,7 +37,9 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
   parser.end();
   logger.debug('parser.manifest', parser.manifest);
 
-  if (parser.manifest.playlists?.length > 0) {
+  let depth = 0;
+  while (parser.manifest.playlists?.length > 0) {
+    if (++depth > 5) throw new Error('播放列表嵌套过深');
     let maxBandwidthItem = parser.manifest.playlists[0];
     for (const item of parser.manifest.playlists) {
       if (!maxBandwidthItem || (item.attributes?.BANDWIDTH || 0) > (maxBandwidthItem.attributes?.BANDWIDTH || 0)) {
@@ -49,7 +50,10 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
     url = new URL((maxBandwidthItem as unknown as { uri: string }).uri, url).toString();
     logger.debug('maxBandwidthItem', maxBandwidthItem, url);
 
-    content = (await getRetry<string>(url, headers)).data;
+    const response = await getRetry<string>(url, headers, 3, signal);
+    url = response.url;
+    content = response.data;
+    if (!content.trim().startsWith('#EXTM3U')) throw new Error('子播放列表无效，请检查请求头');
     parser = new Parser();
     parser.push(content);
     parser.end();
@@ -70,8 +74,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
   };
 
   if (!result.tsCount) {
-    logger.error('m3u8 file error!\n', url, content);
-    return result;
+    throw new Error('播放列表中没有视频分片');
   }
 
   /**
@@ -86,7 +89,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
   }
 
   const mapInfo = mapInfoList[0];
-  const initSegment = mapInfo?.uri ? await fetchInitSegment(mapInfo, url, cacheDir, result.crypto, headers) : null;
+  const initSegment = mapInfo?.uri ? await fetchInitSegment(mapInfo, url, cacheDir, result.crypto, headers, signal) : null;
 
   if (initSegment) result.initSegment = initSegment;
   result.container = resolveContainer(initSegment, tsList[0].uri);
@@ -105,7 +108,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
     if (item.key) {
       const tsKeyInfo = item.key;
       if (!tsKeyInfo.uri.includes('://')) tsKeyInfo.uri = new URL(tsKeyInfo.uri, url).toString();
-      await fetchKeyInfo(tsKeyInfo.method, tsKeyInfo.uri, result.crypto, tsKeyInfo.iv, headers);
+      await fetchKeyInfo(tsKeyInfo.method, tsKeyInfo.uri, result.crypto, tsKeyInfo.iv, headers, signal);
     }
 
     let byterange = item.byterange;
@@ -126,6 +129,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
       tsOut: resolve(cacheDir, `${md5(nameSeed)}${segmentExt}`),
       byterange,
       keyUri: item.key?.uri || '',
+      iv: item.key ? parseIv(item.key.iv, (Number(parser.manifest.mediaSequence) || 0) + i) : undefined,
       m3u8: url,
     });
     result.duration += item.duration;
@@ -146,20 +150,29 @@ function resolveContainer(initSegment: M3u8MapInfo | null, firstSegmentUri: stri
 }
 
 /** 获取并缓存加密 key */
-async function fetchKeyInfo(method: string, uri: string, crypto: M3u8Info['crypto'], iv: unknown, headers?: OutgoingHttpHeaders | string) {
+async function fetchKeyInfo(
+  method: string,
+  uri: string,
+  crypto: M3u8Info['crypto'],
+  iv: unknown,
+  headers?: OutgoingHttpHeaders | string,
+  signal?: AbortSignal
+) {
   if (!uri || crypto[uri]) return;
+  if (method?.toUpperCase() !== 'AES-128') throw new Error(`暂不支持加密方式 ${method}，不能直接下载合并`);
 
-  const r = await getRetry(uri, headers);
+  const r = await getRetry(uri, headers, 3, signal);
 
   if (r.response.statusCode !== 200) {
     logger.error('获取加密 key 失败:', uri, r.response.statusCode, r.data);
     return;
   }
 
+  if (r.buffer.length !== 16) throw new Error('AES-128 密钥长度无效，请检查 Referer 或 Cookie');
   crypto[uri] = {
     uri,
     method: method?.toUpperCase() || 'AES-128',
-    iv: typeof iv === 'string' ? new Uint8Array(Buffer.from(iv)) : (iv as M3u8Crypto['iv']),
+    iv: iv ? parseIv(iv) : undefined,
     key: r.buffer,
   };
 }
@@ -173,7 +186,8 @@ async function fetchInitSegment(
   baseUrl: string,
   cacheDir: string,
   crypto: M3u8Info['crypto'],
-  headers?: OutgoingHttpHeaders | string
+  headers?: OutgoingHttpHeaders | string,
+  signal?: AbortSignal
 ): Promise<M3u8MapInfo | null> {
   const uri = mapInfo.uri.includes('://') ? mapInfo.uri : new URL(mapInfo.uri, baseUrl).toString();
   const result: M3u8MapInfo = { uri, tsOut: '', byterange: mapInfo.byterange, keyUri: '' };
@@ -181,7 +195,7 @@ async function fetchInitSegment(
   try {
     if (mapInfo.key?.uri) {
       const keyUri = mapInfo.key.uri.includes('://') ? mapInfo.key.uri : new URL(mapInfo.key.uri, baseUrl).toString();
-      await fetchKeyInfo(mapInfo.key.method, keyUri, crypto, mapInfo.key.iv, headers);
+      await fetchKeyInfo(mapInfo.key.method, keyUri, crypto, mapInfo.key.iv, headers, signal);
       result.keyUri = keyUri;
     }
 
@@ -191,12 +205,12 @@ async function fetchInitSegment(
     if (existsSync(tsOut) && statSync(tsOut).size > 0) {
       result.tsOut = tsOut;
       result.tsSize = statSync(tsOut).size;
-      result.container = detectContainerByFile(tsOut) || detectContainerType(uri);
+      result.container = detectContainerByFile(tsOut);
       return result;
     }
 
     // EXT-X-MAP 支持 BYTERANGE，此时只请求初始化段所在的字节区间
-    const r = await getRetry<Buffer>(uri, withRangeHeader(headers, mapInfo.byterange));
+    const r = await getRetry<Buffer>(uri, withRangeHeader(headers, mapInfo.byterange), 3, signal);
 
     if (!isOkStatus(r.response.statusCode)) {
       logger.warn('[EXT-X-MAP][failed]', r.response.statusCode, uri, r.data);
@@ -208,12 +222,20 @@ async function fetchInitSegment(
       return null;
     }
 
-    const initBuffer = sliceByterange(r.buffer, mapInfo.byterange);
+    const initBuffer = sliceByterange(r.buffer, mapInfo.byterange, r.response.statusCode);
     const data = decryptSegmentData(initBuffer, result.keyUri ? crypto[result.keyUri] : undefined);
-    const container = detectContainerByHeader(data.subarray(0, 256)) || detectContainerType(uri) || 'fmp4';
+    const detected = detectContainerByHeader(data.subarray(0, 256));
+    const container = detected !== 'unknown' ? detected : 'fmp4';
 
-    mkdirp(dirname(tsOut));
-    await promises.writeFile(tsOut, data);
+    await promises.mkdir(dirname(tsOut), { recursive: true });
+    const temporary = `${tsOut}.part`;
+    try {
+      await promises.writeFile(temporary, data, { signal });
+      signal?.throwIfAborted();
+      await promises.rename(temporary, tsOut);
+    } finally {
+      await promises.rm(temporary, { force: true });
+    }
 
     result.tsOut = tsOut;
     result.tsSize = data.byteLength;
@@ -222,9 +244,20 @@ async function fetchInitSegment(
 
     return result;
   } catch (e) {
-    logger.warn('[EXT-X-MAP][error]', uri, (e as Error)?.message || e);
-    return null;
+    throw new Error(`初始化分片下载失败: ${(e as Error).message}`);
   }
 }
 
 // parseM3U8('', 't.m3u8').then(d => console.log(d));
+
+function parseIv(iv?: unknown, sequence = 0): Uint8Array {
+  const result = Buffer.alloc(16);
+  if (iv instanceof Uint32Array) {
+    iv.forEach((word, index) => result.writeUInt32BE(word, index * 4));
+    return result;
+  }
+  if (iv instanceof Uint8Array) return iv;
+  if (typeof iv === 'string') return Buffer.from(iv.replace(/^0x/i, '').padStart(32, '0'), 'hex');
+  result.writeBigUInt64BE(BigInt(sequence), 8);
+  return result;
+}

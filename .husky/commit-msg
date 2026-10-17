@@ -1,1 +1,1 @@
-npm exec flh -- --commitlint
+node scripts/commit-msg.cjs "$1"

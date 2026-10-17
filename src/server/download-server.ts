@@ -1,886 +1,407 @@
-import { existsSync, promises as fsPromises } from 'node:fs';
+import { promises as fs } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, resolve } from 'node:path';
-import { assign, concurrency, getUrlParams, md5, mkdirp } from '@lzwme/fe-utils';
-import { cyan, gray, green, red } from 'console-log-colors';
-import type { Express, Request } from 'express';
-import type { WebSocketServer } from 'ws';
-import { fileDownload } from '../lib/file-download.js';
+import { basename, dirname, extname, resolve, sep } from 'node:path';
+import express, { type Express, type Request, type Response } from 'express';
+import { WebSocketServer } from 'ws';
 import { formatOptions } from '../lib/format-options.js';
-import { getM3u8Urls } from '../lib/getM3u8Urls.js';
-import { getLang, LANG_CODES, t } from '../lib/i18n.js';
 import { initProxy } from '../lib/init-proxy.js';
-import { m3u8DLStop, m3u8Download } from '../lib/m3u8-download.js';
-import { checkFileExists, logger } from '../lib/utils.js';
-import type { ServerInfo, TaskItem } from '../types/contract.js';
-import type { M3u8DLOptions, M3u8DLResult, M3u8WorkerPool, TsItemInfo } from '../types/m3u8.js';
-import { VideoParser } from '../video-parser/index.js';
+import { m3u8Download } from '../lib/m3u8-download.js';
+import { checkFileExists, formatHeaders, logger, md5, normalizeDownloadUrl } from '../lib/utils.js';
+import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.js';
+import type { M3u8DLOptions } from '../types/m3u8.js';
 
 interface DLServerOptions {
   port?: number;
   cacheDir?: string;
   configPath?: string;
   debug?: boolean;
-  /** 登录 token，默认取环境变量 DS_SECRET */
   token?: string;
-  /** 是否限制文件访问(localplay视频资源等仅可读取下载和缓存目录) */
-  limitFileAccess?: boolean;
 }
-
-interface CacheItem extends Omit<TaskItem, 'options' | 'dlOptions'> {
-  /** 用户设置的参数 */
-  options: M3u8DLOptions;
-  /** 格式化后实际下载使用的参数 */
-  dlOptions?: M3u8DLOptions;
-  /**
-   * 当前任务的 ts 信息
-   * @deprecated 下一版本将移除
-   */
-  current?: TsItemInfo;
-  workPoll?: M3u8WorkerPool;
+interface Run {
+  controller: AbortController;
+  completion: Promise<void>;
 }
-
 const rootDir = resolve(__dirname, '../..');
-
 export class DLServer {
-  app: Express = null;
-  wss: WebSocketServer | null = null;
-  /** DS 参数 */
-  options: DLServerOptions = {
-    port: Number(process.env.DS_PORT) || 6600,
-    cacheDir: process.env.DS_CACHE_DIR || resolve(homedir(), '.m3u8-dl/cache'),
-    token: process.env.DS_SECRET || process.env.DS_TOKEN || '',
-    debug: process.env.DS_DEBUG === '1',
-    limitFileAccess: ['1', 'true'].includes(process.env.DS_LIMTE_FILE_ACCESS),
+  app: Express = express();
+  server: Server;
+  wss: WebSocketServer;
+  ready: Promise<void>;
+  private token: string;
+  private cacheDir: string;
+  private configPath: string;
+  private tasks = new Map<string, TaskItem>();
+  private runs = new Map<string, Run>();
+  private saveTimer: NodeJS.Timeout;
+  private broadcastTimer: NodeJS.Timeout;
+  private writeQueue = Promise.resolve();
+  private version = '1.10.0';
+  private closing = false;
+  private cfg: ServerConfig = {
+    saveDir: process.env.DS_SAVE_DIR || './downloads',
+    threadNum: 4,
+    maxDownloads: 2,
+    delCache: true,
+    ffmpegPath: process.env.DS_FFMPEG_PATH || '',
+    headers: '',
+    mergeTimeout: 180,
+    proxyMode: (process.env.DS_PROXY_MODE || 'system') as ServerConfig['proxyMode'],
+    proxyUrl: process.env.DS_PROXY_URL || '',
+    noProxy: process.env.DS_NO_PROXY || '',
   };
-  private serverInfo: ServerInfo = {
-    version: '',
-    ariang: false,
-  };
-  private cfg = {
-    /** 支持 web 设置修改的参数 */
-    webOptions: {
-      /** 最多同时下载数量。超过改值则设置为 pending */
-      maxDownloads: 3,
-      /** 是否显示预览按钮 */
-      showPreview: true,
-      /** 是否显示边下边播按钮 */
-      showLocalPlay: true,
-    },
-    /** download 下载默认参数 */
-    dlOptions: {
-      debug: process.env.DS_DEBUG === '1',
-      saveDir: process.env.DS_SAVE_DIR || './downloads',
-      threadNum: 4,
-      ffmpegPath: process.env.DS_FFMPEG_PATH || undefined,
-      // 代理配置改为字符串模式：'custom', 'system', 'disabled'
-      proxyMode: process.env.DS_PROXY_MODE || 'system',
-      proxyUrl: process.env.DS_PROXY_URL || undefined,
-      noProxy: process.env.DS_NO_PROXY || undefined,
-    } as M3u8DLOptions,
-  };
-  /** 下载任务缓存 */
-  private dlCache = new Map<string, CacheItem>();
-  /** 正在下载的任务数量 */
-  private get downloading() {
-    return Array.from(this.dlCache.values()).filter(item => item.status === 'resume').length;
+  constructor(options: DLServerOptions = {}) {
+    this.cacheDir = resolve(options.cacheDir || process.env.DS_CACHE_DIR || resolve(homedir(), '.m3u8-dl/cache'));
+    this.configPath = options.configPath || resolve(this.cacheDir, 'config.json');
+    this.token = options.token || process.env.DS_SECRET || process.env.DS_TOKEN || '';
+    this.server = createServer(this.app);
+    this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
+    this.ready = this.init(options.port ?? (Number(process.env.DS_PORT) || 6600));
+    this.ready.catch(error => logger.error('服务器启动失败:', error));
   }
-  constructor(opts: DLServerOptions = {}) {
-    opts = Object.assign(this.options, opts);
-    opts.cacheDir = resolve(opts.cacheDir);
-    if (!opts.configPath) opts.configPath = resolve(opts.cacheDir, 'config.json');
-
-    if (opts.token) opts.token = md5(opts.token.trim()).slice(0, 8);
-    this.init();
+  private authorized(token: string) {
+    return !this.token || token === this.token || token === md5(this.token.trim()).slice(0, 8);
   }
-  private async init() {
-    const pkgFile = resolve(rootDir, 'package.json');
-    if (await checkFileExists(pkgFile)) {
-      const pkg = JSON.parse(await fsPromises.readFile(pkgFile, 'utf8'));
-      this.serverInfo.version = pkg.version;
-    }
-    this.serverInfo.ariang = await checkFileExists(resolve(rootDir, 'client/ariang/index.html'));
-
-    await this.loadConfig();
-    if (this.cfg.dlOptions.debug) logger.updateOptions({ levelType: 'debug' });
-    await this.loadCache();
-    await this.createApp();
-    this.initRouters();
-    logger.debug('Server initialized', 'cacheSize:', this.dlCache.size, this.options, this.cfg.dlOptions);
-
-    // 初始化 global-agent 代理
-    initProxy(this.cfg.dlOptions);
-  }
-  private async loadCache() {
-    const cacheFile = resolve(this.options.cacheDir, 'cache.json');
-
-    if (await checkFileExists(cacheFile)) {
-      (JSON.parse(await fsPromises.readFile(cacheFile, 'utf8')) as [string, CacheItem][]).forEach(([url, item]) => {
-        if (item.status === 'resume') item.status = 'pause';
-        this.dlCache.set(url, item);
-      });
-      this.checkDLFileIsExists();
-    }
-  }
-  private checkDLFileLaest = 0;
-  private checkDLFileTimer: NodeJS.Timeout = null;
-  private async checkDLFileIsExists() {
-    const now = Date.now();
-    const interval = 1000 * 60;
-
-    clearTimeout(this.checkDLFileTimer);
-    const delay = this.checkDLFileLaest + interval - now;
-    if (delay > 0) {
-      this.checkDLFileTimer = setTimeout(() => {
-        this.checkDLFileIsExists();
-      }, delay + 100);
-      return;
-    }
-
-    const tasks = [...this.dlCache.values()].map(item => () => this.checkItemStatus(item));
-    await concurrency(tasks, 3);
-    this.checkDLFileLaest = now;
-  }
-  private async checkItemStatus(item: CacheItem) {
-    if (item.status === 'done') {
-      if (item.current) {
-        if (!item.cacheDir && item.current.tsOut) item.cacheDir = dirname(item.current.tsOut);
-        delete item.current;
-      }
-
-      if (!(await checkFileExists(item.localVideo)) && !existsSync(item.localVideo)) {
-        item.status = 'error';
-        item.errmsg = '已删除';
-      }
-    } else if (item.status === 'error' && item.progress === 100) {
-      if (await checkFileExists(item.localVideo)) {
-        item.status = 'done';
-        delete item.errmsg;
-      }
-    }
-  }
-  dlCacheClone() {
-    const info: [string, CacheItem][] = [];
-    for (const [url, v] of this.dlCache) {
-      const { workPoll, ...item } = v;
-      for (const [key, value] of Object.entries(item)) {
-        if (typeof value === 'function') delete item[key as keyof typeof item];
-      }
-      info.push([url, item]);
-    }
-    return info;
-  }
-  private cacheSaveTimer: NodeJS.Timeout = null;
-  public saveCache() {
-    clearTimeout(this.cacheSaveTimer);
-    this.cacheSaveTimer = setTimeout(() => {
-      const cacheFile = resolve(this.options.cacheDir, 'cache.json');
-
-      mkdirp(dirname(cacheFile));
-      fsPromises.writeFile(cacheFile, JSON.stringify(this.dlCacheClone()));
-    }, 1000);
-  }
-  private async loadConfig(configPath?: string) {
+  private async init(port: number) {
+    await fs.mkdir(this.cacheDir, { recursive: true });
     try {
-      if (!configPath) configPath = this.options.configPath;
-      if (await checkFileExists(configPath)) assign(this.cfg, JSON.parse(await fsPromises.readFile(configPath, 'utf8')));
-    } catch (error) {
-      logger.error('Load config failed:', error);
-    }
-  }
-  async saveConfig(config: M3u8DLOptions, configPath?: string) {
-    if (!configPath) configPath = this.options.configPath;
-
-    // 验证 ffmpegPath 是否存在
-    if (config.ffmpegPath?.trim()) {
-      const ffmpegPath = config.ffmpegPath.trim();
-      if (!(await checkFileExists(ffmpegPath))) {
-        throw new Error(`ffmpeg 路径不存在: ${ffmpegPath}`);
+      const stored = JSON.parse(await fs.readFile(this.configPath, 'utf8'));
+      const config = { ...(stored.dlOptions || stored), ...stored.webOptions };
+      for (const key of Object.keys(this.cfg) as (keyof ServerConfig)[]) {
+        if (key in config) Object.assign(this.cfg, { [key]: config[key] });
       }
-      // 检查是否为文件（不是目录）
-      const stats = await fsPromises.stat(ffmpegPath);
-      if (!stats.isFile()) {
-        throw new Error(`ffmpeg 路径不是文件: ${ffmpegPath}`);
-      }
+      if (typeof this.cfg.headers !== 'string') this.cfg.headers = JSON.stringify(this.cfg.headers);
+      this.cfg.maxDownloads = Math.min(5, Math.max(1, Number(this.cfg.maxDownloads) || 2));
+    } catch {
+      /* First launch. */
     }
-
-    for (const [key, value] of Object.entries(config)) {
-      // @ts-expect-error 忽略类型错误
-      if (key in this.cfg.webOptions) this.cfg.webOptions[key] = value;
-      // @ts-expect-error 忽略类型错误
-      else this.cfg.dlOptions[key] = value;
-    }
-
-    mkdirp(dirname(configPath));
-    const result = await fsPromises.writeFile(configPath, JSON.stringify(this.cfg, null, 2));
-
-    // 重新初始化代理
-    await initProxy(this.cfg.dlOptions);
-
-    return result;
-  }
-  private async createApp() {
-    const { default: express } = await import('express');
-    const { WebSocketServer } = await import('ws');
-    const app = express();
-    const server = app.listen(this.options.port, () => logger.info(`Server running on port ${green(this.options.port)}`));
-    const wss = new WebSocketServer({ server });
-    const hasLocalCdnDir = await checkFileExists(resolve(rootDir, 'client/local/cdn'));
-
-    this.app = app;
-    this.wss = wss as never;
-
-    app.use(async (req, res, next) => {
-      // 处理 SPA 路由：根路径和 /page/* 路径都返回 index.html
-      const isIndexPage = ['/', '/index.html'].includes(req.path) || req.path.startsWith('/page/');
-      const isPlayPage = req.path.startsWith('/play.html');
-      const isApi = req.path.startsWith('/api/');
-
-      if (!isApi && (isIndexPage || isPlayPage)) {
-        let htmlContent = await fsPromises.readFile(resolve(rootDir, `client/${isPlayPage ? 'play' : 'index'}.html`), 'utf-8');
-
-        if (hasLocalCdnDir) {
-          // 提取所有 zstatic.net 的 js 和 css 资源地址，若子路径存在于 local/cdn 目录下则替换为本地路径
-          const zstaticRegex = /https:\/\/s4\.zstatic\.net\/ajax\/libs\/[^\s"'`<>]+\.(js|css)/g;
-          const zstaticMatches = htmlContent.match(zstaticRegex);
-
-          if (zstaticMatches) {
-            for (const match of zstaticMatches) {
-              const relativePath = match.split('libs/')[1];
-              const localPath = resolve(rootDir, `client/local/cdn/${relativePath}`);
-              if (await checkFileExists(localPath)) {
-                htmlContent = htmlContent.replaceAll(match, `/local/cdn/${relativePath}`);
-              }
-            }
-
-            htmlContent = htmlContent.replaceAll(/integrity="[^"]+"\n?/g, '');
-          }
-        }
-
-        res.setHeader('content-type', 'text/html').send(htmlContent);
-      } else {
-        next();
+    try {
+      const entries = JSON.parse(await fs.readFile(resolve(this.cacheDir, 'cache.json'), 'utf8')) as [string, TaskItem][];
+      for (const [url, item] of entries) {
+        if (['resume', 'pending'].includes(item.status)) item.status = 'pause';
+        if (item.options) delete (item.options as M3u8DLOptions).retryFailedOnly;
+        this.tasks.set(url, item);
       }
-    });
-
-    app.use(express.json());
-    app.use(express.static(resolve(rootDir, 'client')));
-
-    app.use((req, res, next) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      res.setHeader('Cache-Control', 'no-cache');
-
-      if (req.method === 'OPTIONS') {
-        res.status(200).end();
+    } catch {
+      /* No existing tasks. */
+    }
+    await initProxy(this.cfg);
+    this.app.use(express.json({ limit: '1mb' }));
+    this.app.get('/healthcheck', (_req, res) => res.json({ code: 0, message: 'ok' }));
+    this.app.use('/api', (req, res, next) => {
+      const token = String(req.headers.authorization || (req.path === '/file' ? req.query.token || '' : ''));
+      if (!this.authorized(token)) {
+        res.status(401).json({ code: 1008, message: '请输入正确的访问密码' });
         return;
       }
-
-      if (this.options.token && req.headers.authorization !== this.options.token) {
-        const ignorePaths = ['/healthcheck', '/localplay'];
-        if (!ignorePaths.some(d => req.url.includes(d))) {
-          const lang = this.getLangFromRequest(req);
-          const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-          logger.warn('Unauthorized access:', clientIp, req.url, req.headers.authorization);
-          res.status(401).json({ message: t('api.error.unauthorized', lang), code: 1008 });
-          return;
-        }
-      }
-
+      res.setHeader('Cache-Control', 'no-store');
       next();
     });
-
-    wss.on('connection', (ws, req) => {
-      const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-      logger.info('Client connected:', clientIp, req.url);
-
-      if (this.options.token) {
-        const token = getUrlParams(req.url).token;
-        if (!token || token !== this.options.token) {
-          logger.error('Unauthorized client:', req.socket.remoteAddress);
-          ws.close(1008, 'Unauthorized');
-          return;
-        }
-      }
-
-      this.checkDLFileIsExists();
-      ws.send(JSON.stringify({ type: 'serverInfo', data: this.serverInfo }));
-      ws.send(JSON.stringify({ type: 'tasks', data: Object.fromEntries(this.dlCacheClone()) }));
+    this.routes();
+    // Only the new app assets are public. Player and old CDN resources are not served.
+    this.app.use('/assets', express.static(resolve(rootDir, 'client/assets')));
+    this.app.get(['/', '/index.html', /^\/page(?:\/.*)?$/], (_req, res) => res.sendFile(resolve(rootDir, 'client/index.html')));
+    this.app.use((error: Error, _req: Request, res: Response, _next: express.NextFunction) => {
+      res.status(400).json({ code: 1, message: error.message });
     });
-    wss.on('close', () => logger.info('WebSocket server closed'));
-    wss.on('error', err => logger.error('WebSocket server error:', err));
-    wss.on('listening', () => logger.info(`WebSocket server listening on port ${green(this.options.port)}`));
-
-    return { app, wss };
+    this.wss.on('connection', (ws, req) => {
+      const token = new URL(req.url, 'http://localhost').searchParams.get('token') || '';
+      if (!this.authorized(token)) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
+      ws.send(JSON.stringify({ type: 'serverInfo', data: { version: this.version } }));
+      ws.send(JSON.stringify({ type: 'tasks', data: Object.fromEntries(this.tasks) }));
+    });
+    await new Promise<void>((resolveReady, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(port, () => {
+        this.server.removeListener('error', reject);
+        resolveReady();
+      });
+    });
+    logger.info(`M3U8 下载器: http://localhost:${(this.server.address() as { port: number }).port}`);
   }
-  private async startDownload(url: string, options?: M3u8DLOptions) {
-    if (!url) return logger.error('[satartDownload]Invalid URL:', url);
-
-    if (url.endsWith('.html')) {
-      const item = Array.from(await getM3u8Urls({ url, headers: options.headers }))[0];
-      if (!item) return logger.error('[startDownload]不是有效(包含)M3U8的地址:', url);
-      url = item[0];
-      if (!options.filename) options.filename = item[1];
-    }
-
-    const { options: dlOptions } = await formatOptions(url, { ...this.cfg.dlOptions, ...options, cacheDir: this.options.cacheDir });
-    if (!dlOptions.saveDir) dlOptions.saveDir = this.cfg.dlOptions.saveDir;
-    const cacheItem = this.dlCache.get(url) || { options, dlOptions, status: 'pending', url };
-    logger.debug('startDownload', url, dlOptions, cacheItem.status);
-
-    if (cacheItem.status === 'resume') return;
-
-    if (cacheItem.localVideo) {
-      if (await checkFileExists(cacheItem.localVideo)) {
-        if (cacheItem.status === 'done') return;
-      } else {
-        delete cacheItem.localVideo;
-        if (cacheItem.endTime) delete cacheItem.endTime;
-      }
-    } else if (!this.dlCache.has(url)) {
-      // 如果本地视频已存在，则重命名 filename
-      const localVideo = resolve(dlOptions.saveDir, dlOptions.filename);
-      const hasSameNameVideo = [...this.dlCache.values()].some(
-        d => d.dlOptions.saveDir === dlOptions.saveDir && d.dlOptions.filename === dlOptions.filename
-      );
-
-      if (hasSameNameVideo || (await checkFileExists(localVideo))) {
-        const ext = extname(localVideo) || '';
-        dlOptions.filename = `${basename(localVideo, ext)}.${Date.now()}${ext}`;
-        logger.info('存在重名视频，重命名filename：', gray(localVideo), '->', cyan(dlOptions.filename));
-      }
-    }
-
-    cacheItem.status = this.downloading >= this.cfg.webOptions.maxDownloads ? 'pending' : 'resume';
-    // pending 优先级靠后
-    if (cacheItem.status === 'pending' && this.dlCache.has(url)) this.dlCache.delete(url);
-    this.dlCache.set(url, cacheItem);
-    this.wsSend('progress', url);
-
-    if (cacheItem.status === 'pending') return;
-
-    let workPoll: M3u8WorkerPool = cacheItem.workPoll;
-    const opts: M3u8DLOptions = {
-      ...dlOptions,
-      showProgress: dlOptions.debug || this.options.debug,
-      onInited: (_s, _i, wp) => {
-        workPoll = wp;
-      },
-      onProgress: (_finished, _total, current, stats) => {
-        const item = this.dlCache.get(url);
-        if (!item) return false; // 已删除
-        const status = item.status || 'resume';
-
-        if (!item.cacheDir && current?.tsOut) item.cacheDir = dirname(current.tsOut);
-        Object.assign(item, { ...stats, dlOptions, status, workPoll, url });
-        this.dlCache.set(url, item);
-        this.saveCache();
-        this.wsSend('progress', url);
-
-        return status !== 'pause';
-      },
+  private broadcast(immediate = false) {
+    if (this.broadcastTimer && !immediate) return;
+    clearTimeout(this.broadcastTimer);
+    const send = () => {
+      this.broadcastTimer = undefined;
+      const message = JSON.stringify({ type: 'tasks', data: Object.fromEntries(this.tasks) });
+      for (const client of this.wss.clients) if (client.readyState === 1) client.send(message);
     };
-    const afterDownload = async (r: M3u8DLResult, url: string) => {
-      const item = this.dlCache.get(url) || cacheItem;
-
-      if (r.filepath && (await checkFileExists(r.filepath))) {
-        item.localVideo = r.filepath;
-        item.downloadedSize = (await fsPromises.stat(r.filepath)).size;
-      } else if (!r.errmsg && opts.convert !== false) r.errmsg = '下载失败';
-
-      item.endTime = Date.now();
-      item.errmsg = r.errmsg;
-      item.status = r.isExist ? 'done' : r.errmsg ? 'error' : 'done';
-      logger.info('Download complete:', item.status, red(r.errmsg), gray(url), cyan(r.filepath));
-
-      this.dlCache.set(url, item);
-      this.wsSend('progress', url);
-      this.saveCache();
-      this.startNextPending();
+    if (immediate) send();
+    else this.broadcastTimer = setTimeout(send, 250);
+  }
+  private persist() {
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      this.flush().catch(error => logger.error('任务保存失败:', error));
+    }, 500);
+  }
+  private flush() {
+    const content = JSON.stringify([...this.tasks]);
+    this.writeQueue = this.writeQueue
+      .catch(() => {})
+      .then(async () => {
+        const target = resolve(this.cacheDir, 'cache.json');
+        await fs.writeFile(`${target}.part`, content);
+        await fs.rename(`${target}.part`, target);
+      });
+    return this.writeQueue;
+  }
+  private async enqueue(input: string, options: M3u8DLOptions = {}) {
+    const url = normalizeDownloadUrl(input);
+    const existing = this.tasks.get(url);
+    if (this.runs.has(url) || existing?.status === 'done') return;
+    const merged = { ...existing?.options, ...options } as M3u8DLOptions;
+    const formatted = await formatOptions(url, { ...this.cfg, ...merged });
+    if (!existing) {
+      const original = formatted.options.filename;
+      const extension = extname(original);
+      let suffix = 1;
+      while (
+        [...this.tasks.values()].some(task => task.filename === formatted.options.filename) ||
+        (await checkFileExists(resolve(formatted.options.saveDir, formatted.options.filename)))
+      ) {
+        formatted.options.filename = `${basename(original, extension)} (${++suffix})${extension}`;
+      }
+    }
+    const item: TaskItem = {
+      ...existing,
+      url,
+      status: 'pending',
+      phase: 'queued',
+      errmsg: '',
+      mergeMessage: '',
+      mergeProgress: 0,
+      filename: formatted.options.filename,
+      options: { ...merged, filename: formatted.options.filename },
+      cacheDir: resolve(this.cacheDir, md5(url)),
     };
-
+    this.tasks.set(url, item);
+    this.persist();
+    this.broadcast(true);
+    this.startNext();
+  }
+  private startNext() {
+    if (this.closing) return;
+    for (const item of this.tasks.values()) {
+      if (this.runs.size >= this.cfg.maxDownloads) break;
+      if (item.status !== 'pending' || this.runs.has(item.url)) continue;
+      item.status = 'resume';
+      const controller = new AbortController();
+      // Reserve the slot before run() can emit its first progress update.
+      const run: Run = { controller, completion: Promise.resolve() };
+      this.runs.set(item.url, run);
+      run.completion = this.run(item, controller).finally(() => {
+        this.runs.delete(item.url);
+        this.persist();
+        this.broadcast(true);
+        this.startNext();
+      });
+    }
+  }
+  private async run(item: TaskItem, controller: AbortController) {
     try {
-      if (dlOptions.type === 'parser') {
-        console.log('\n\nDownloading with VideoParser\n\n', dlOptions, url);
-        VideoParser.download(url, opts).then(r => afterDownload(r, url));
-      } else if (dlOptions.type === 'file') {
-        fileDownload(url, opts).then(r => afterDownload(r, url));
+      const options = item.options as M3u8DLOptions;
+      const headers = { ...formatHeaders(this.cfg.headers), ...formatHeaders(options?.headers) };
+      const result = await m3u8Download(item.url, {
+        ...this.cfg,
+        ...options,
+        headers,
+        cacheDir: this.cacheDir,
+        convert: true,
+        signal: controller.signal,
+        onProgress: (_finished, _total, _current, stats) => {
+          if (!this.tasks.has(item.url) || controller.signal.aborted) return false;
+          Object.assign(item, stats);
+          this.broadcast();
+          this.persist();
+          return true;
+        },
+      });
+      if (!this.tasks.has(item.url)) return;
+      if (result.paused || controller.signal.aborted) item.status = 'pause';
+      else if (result.errmsg) {
+        item.status = 'error';
+        item.errmsg = result.errmsg;
+      } else if (result.filepath) {
+        item.status = 'done';
+        item.phase = 'done';
+        item.progress = 100;
+        item.localVideo = result.filepath;
+        item.filename = basename(result.filepath);
+        item.downloadedSize = (await fs.stat(result.filepath)).size;
+        item.errmsg = '';
       } else {
-        m3u8Download(url, opts).then(r => afterDownload(r, url));
+        item.status = 'error';
+        item.errmsg = '未生成合并文件，缓存已保留';
       }
+      item.endTime = Date.now();
     } catch (error) {
-      afterDownload({ filepath: '', errmsg: (error as Error).message }, url);
-      logger.error('下载失败:', error);
-    }
-  }
-  startNextPending() {
-    // 找到一个 pending 的任务，开始下载
-    const nextItem = this.dlCache.entries().find(([_url, d]) => d.status === 'pending');
-    if (nextItem) {
-      this.startDownload(nextItem[0], nextItem[1].options);
-      this.wsSend('progress', nextItem[0]);
-    }
-  }
-  private getLangFromRequest(req: Request): string {
-    // Try to get lang from query parameter
-    const queryLang = req.query?.lang as string;
-    if (queryLang && LANG_CODES.has(queryLang)) {
-      return queryLang;
-    }
-
-    // Try to get lang from body
-    const bodyLang = (req.body as { lang?: string })?.lang;
-    if (bodyLang && LANG_CODES.has(bodyLang)) {
-      return bodyLang;
-    }
-
-    // Try to get lang from Accept-Language header
-    const acceptLanguage = req.headers['accept-language'];
-    if (acceptLanguage) {
-      const langCode = acceptLanguage.toLowerCase().split(',')[0].split('-')[0].trim();
-      if (LANG_CODES.has(langCode)) {
-        return langCode;
+      if (this.tasks.has(item.url)) {
+        item.status = controller.signal.aborted ? 'pause' : 'error';
+        item.errmsg = controller.signal.aborted ? '' : (error as Error).message;
       }
+    } finally {
+      if (item.options) delete (item.options as M3u8DLOptions).retryFailedOnly;
     }
-
-    // Fallback to default
-    return getLang();
   }
-
-  private wsSend(type = 'progress', data?: unknown) {
-    if (type === 'tasks' && !data) {
-      data = Object.fromEntries(this.dlCacheClone());
-    } else if (type === 'progress' && typeof data === 'string') {
-      const item = this.dlCache.get(data);
-      if (!item) return;
-
-      const { workPoll, ...stats } = item;
-      data = [{ ...stats, url: data }];
-    }
-
-    // 广播进度信息给所有客户端
-    this.wss.clients.forEach(client => {
-      if (client.readyState === 1) client.send(JSON.stringify({ type, data }));
+  private routes() {
+    const app = this.app;
+    app.get('/api/config', (_req, res) => res.json({ code: 0, data: this.cfg }));
+    app.post('/api/config', async (req, res) => {
+      const next = { ...this.cfg };
+      for (const key of Object.keys(next) as (keyof ServerConfig)[]) if (key in req.body) Object.assign(next, { [key]: req.body[key] });
+      if (
+        ![next.threadNum, next.maxDownloads, next.mergeTimeout].every(Number.isInteger) ||
+        next.threadNum < 1 ||
+        next.threadNum > 16 ||
+        next.maxDownloads < 1 ||
+        next.maxDownloads > 5 ||
+        next.mergeTimeout < 15 ||
+        next.mergeTimeout > 3600
+      )
+        throw new Error('并发分片为 1–16，任务为 1–5，合并超时为 15–3600 秒');
+      if (typeof next.saveDir !== 'string' || !next.saveDir.trim()) throw new Error('保存目录不能为空');
+      if (!['custom', 'system', 'disabled'].includes(next.proxyMode)) throw new Error('无效的代理模式');
+      formatHeaders(next.headers);
+      if (next.proxyMode === 'custom' && !/^https?:\/\//.test(next.proxyUrl)) throw new Error('代理地址应以 http:// 或 https:// 开头');
+      await initProxy(next);
+      await fs.mkdir(dirname(this.configPath), { recursive: true });
+      await fs.writeFile(this.configPath, JSON.stringify(next, null, 2));
+      this.cfg = next;
+      this.startNext();
+      res.json({ code: 0, message: '设置已保存' });
     });
-  }
-  private initRouters() {
-    const { app } = this;
-
-    app.get('/healthcheck', (_req, res) => {
-      res.json({ message: 'ok', code: 0 });
-    });
-
-    app.post('/api/config', (req, res) => {
-      const lang = this.getLangFromRequest(req);
+    app.get('/api/tasks', (_req, res) => res.json({ code: 0, data: Object.fromEntries(this.tasks) }));
+    app.get('/api/segments', async (req, res) => {
+      const url = String(req.query.url || '');
+      const item = this.tasks.get(url);
+      if (!item) {
+        res.status(404).json({ code: 1, message: '任务不存在' });
+        return;
+      }
+      let snapshot: SegmentSnapshot;
       try {
-        const config = req.body as M3u8DLOptions;
-        this.saveConfig(config);
-        res.json({ message: t('api.success.configUpdated', lang), code: 0 });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : t('api.error.configSaveFailed', lang);
-        logger.error('[saveConfig]', errorMessage);
-        res.status(400).json({ message: errorMessage, code: 1 });
+        snapshot = JSON.parse(await fs.readFile(resolve(this.cacheDir, md5(url), 'segments.json'), 'utf8'));
+      } catch {
+        snapshot = {
+          fingerprint: '',
+          items:
+            item.status === 'done'
+              ? Array.from({ length: item.tsCount || 0 }, (_, index) => ({ index, status: 'done', size: 0, attempts: 0 }))
+              : [],
+        };
       }
+      res.json({ code: 0, data: snapshot });
     });
-
-    app.get('/api/config', (_req, res) => {
-      res.json({ code: 0, data: { ...this.cfg.dlOptions, ...this.cfg.webOptions } });
+    app.post('/api/retry-failed', async (req, res) => {
+      const urls: string[] = req.body.all ? [...this.tasks.keys()] : req.body.urls || [];
+      let count = 0;
+      for (const url of urls) {
+        const item = this.tasks.get(url);
+        if (item?.status !== 'error' || this.runs.has(url)) continue;
+        const content = await fs.readFile(resolve(this.cacheDir, md5(url), 'segments.json'), 'utf8').catch(() => '');
+        if (!content) {
+          if (req.body.all) continue;
+          throw new Error('暂无失败分片记录，请使用继续下载');
+        }
+        const snapshot: SegmentSnapshot = JSON.parse(content);
+        if (!snapshot.items.some(segment => segment.status === 'error')) continue;
+        await this.enqueue(url, { ...(item.options as M3u8DLOptions), retryFailedOnly: true });
+        count++;
+      }
+      res.json({ code: 0, message: count ? `已重试 ${count} 个任务的失败分片` : '没有可重试的失败分片' });
     });
-
-    // API to get all download progress
-    app.get('/api/tasks', (_req, res) => {
-      res.json({ code: 0, data: Object.fromEntries(this.dlCacheClone()) });
-    });
-
-    // API to get queue status
-    app.get('/api/queue/status', (_req, res) => {
-      const pendingTasks = Array.from(this.dlCache.entries()).filter(([_, item]) => item.status === 'pending');
-      const activeTasks = Array.from(this.dlCache.entries()).filter(([_, item]) => item.status === 'resume');
-
+    app.get('/api/queue/status', (_req, res) =>
       res.json({
         code: 0,
         data: {
-          queueLength: pendingTasks.length,
-          activeDownloads: activeTasks.map(([url]) => url),
-          maxConcurrent: this.cfg.webOptions.maxDownloads,
+          queueLength: [...this.tasks.values()].filter(item => item.status === 'pending').length,
+          activeDownloads: [...this.runs.keys()],
+          maxConcurrent: this.cfg.maxDownloads,
         },
-      });
-    });
-
-    // API to clear queue
-    app.post('/api/queue/clear', (req, res) => {
-      let count = 0;
-      for (const [url, item] of this.dlCache.entries()) {
-        if (item.status === 'pending') {
-          this.dlCache.delete(url);
-          count++;
-        }
-      }
-
-      if (count) this.wsSend('tasks');
-      const lang = this.getLangFromRequest(req);
-      res.json({ message: t('api.success.queueCleared', lang, { count }), code: 0 });
-    });
-
-    // API to update task priority
-    // app.post('/api/priority', (req, res) => {
-    //   const { url, priority } = req.body;
-    //   const item = this.dlCache.get(url);
-    //   if (!item) {
-    //     res.json({ message: '任务不存在', code: 1 });
-    //     return;
-    //   }
-
-    //   item.options.priority = priority;
-    //   this.saveCache();
-    //   res.json({ message: '已更新任务优先级', code: 0 });
-    // });
-
-    // API to start m3u8 download
+      })
+    );
     app.post('/api/download', async (req, res) => {
-      const { list = [] } = req.body;
-      const lang = this.getLangFromRequest(req);
-
-      try {
-        let duplicateCount = 0;
-        let startedCount = 0;
-        const downloadPromises: Promise<unknown>[] = [];
-
-        // 检查并统计重复的 URL，但仍允许下载
-        for (const item of list) {
-          const { url, ...options } = item;
-          if (url) {
-            if (this.dlCache.has(url)) {
-              duplicateCount++;
-            } else {
-              startedCount++;
-            }
-            // 必须等待任务写入 dlCache 后再广播，否则前端收不到新任务
-            downloadPromises.push(this.startDownload(url, options));
-          }
-        }
-
-        // 使用 allSettled：部分失败时仍广播已入库任务，避免整批 500 导致前端回滚/丢状态
-        const settled = await Promise.allSettled(downloadPromises);
-        const failed = settled.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-        const failedCount = failed.length;
-
-        if (failedCount === settled.length && settled.length > 0) {
-          const firstError = failed[0].reason;
-          const errMsg = firstError instanceof Error ? firstError.message : String(firstError || '');
-          res.status(500).json({
-            code: 1,
-            message: `${t('api.error.downloadFailed', lang)}: ${errMsg}`,
-            failedCount,
-          });
-          return;
-        }
-
-        let message = '';
-        if (duplicateCount > 0) {
-          message = `${t('api.success.downloadStarted', lang, { count: list.length })}，${t('api.error.duplicateDownload', lang, { count: duplicateCount })}`;
-        } else {
-          message = t('api.success.downloadStarted', lang, { count: list.length });
-        }
-        if (failedCount > 0) {
-          message = `${message}，${t('api.error.downloadFailed', lang)}: ${failedCount}`;
-        }
-
-        res.json({
-          message,
-          code: 0,
-          duplicateCount,
-          startedCount,
-          failedCount,
-        });
-        this.wsSend('tasks');
-      } catch (error) {
-        res.status(500).json({
-          code: 1,
-          message: `${t('api.error.downloadFailed', lang)}: ${(error as Error).message || ''}`,
-        });
+      const list = req.body.list;
+      if (!Array.isArray(list) || !list.length || list.length > 100) throw new Error('每次请添加 1–100 个下载链接');
+      // Validate the entire batch before creating tasks.
+      for (const item of list) {
+        normalizeDownloadUrl(item.url);
+        formatHeaders(item.headers);
       }
+      for (const { url, ...options } of list) await this.enqueue(url, options);
+      res.json({ code: 0, message: '已加入下载队列' });
     });
-
-    // API to pause download
-    app.post('/api/pause', (req, res) => {
-      const { urls, all = false } = req.body;
-      const urlsToPause: string[] = all ? [...this.dlCache.keys()] : urls;
-      const list: CacheItem[] = [];
-
-      for (const url of urlsToPause) {
-        const item = this.dlCache.get(url);
-        if (['resume', 'pending'].includes(item?.status)) {
-          m3u8DLStop(url, item.workPoll);
-          item.status = item.tsSuccess > 0 && item.tsSuccess === item.tsCount ? 'done' : 'pause';
-          const { workPoll, ...tItem } = item;
-          list.push(tItem);
-        }
+    app.post('/api/pause', async (req, res) => {
+      const urls: string[] = req.body.all ? [...this.tasks.keys()] : req.body.urls || [];
+      const stopping: Promise<void>[] = [];
+      for (const url of urls) {
+        const item = this.tasks.get(url);
+        if (!item || !['resume', 'pending'].includes(item.status)) continue;
+        item.status = 'pause';
+        const run = this.runs.get(url);
+        run?.controller.abort();
+        if (run) stopping.push(run.completion);
       }
-
-      if (list.length) {
-        this.wsSend('progress', list);
-        this.startNextPending();
-      }
-      const lang = this.getLangFromRequest(req);
-      res.json({ message: t('api.success.paused', lang, { count: list.length }), code: 0, count: list.length });
+      this.broadcast(true);
+      this.persist();
+      await Promise.allSettled(stopping);
+      res.json({ code: 0, message: '已暂停，分片缓存已保留' });
     });
-
-    // API to resume download
-    app.post('/api/resume', (req, res) => {
-      const { urls, all = false } = req.body;
-      const urlsToResume: string[] = all ? [...this.dlCache.keys()] : urls;
-      const list: CacheItem[] = [];
-
-      for (const url of urlsToResume) {
-        const item = this.dlCache.get(url);
-        if (['pause', 'error'].includes(item?.status)) {
-          this.startDownload(url, item.options);
-          const { workPoll, ...t } = item;
-          list.push(t);
-        } else console.log(item?.status, url);
+    app.post('/api/resume', async (req, res) => {
+      const urls: string[] = req.body.all ? [...this.tasks.keys()] : req.body.urls || [];
+      for (const url of urls) {
+        const item = this.tasks.get(url);
+        if (item && ['pause', 'error'].includes(item.status)) await this.enqueue(url, item.options as M3u8DLOptions);
       }
-
-      if (list.length) this.wsSend('progress', list);
-      const lang = this.getLangFromRequest(req);
-      res.json({
-        message: list.length ? t('api.success.resumed', lang, { count: list.length }) : t('api.success.noResumableTasks', lang),
-        code: 0,
-        count: list.length,
-      });
+      res.json({ code: 0, message: '已继续下载' });
     });
-
-    // API to delete download
     app.post('/api/delete', async (req, res) => {
-      const { urls, deleteCache = false, deleteVideo = false } = req.body;
-      const urlsToDelete = urls as string[];
-      const list: string[] = [];
-      const errors: string[] = [];
-
-      for (const url of urlsToDelete) {
-        const item = this.dlCache.get(url);
-        if (item) {
-          logger.info('delete download task:', gray(url), cyan(item.status), cyan(item.localVideo), deleteCache, deleteVideo);
-          m3u8DLStop(url, item.workPoll);
-          this.dlCache.delete(url);
-          list.push(item.url);
-
-          if (deleteCache) {
-            try {
-              const cacheDir = item.cacheDir;
-              if (cacheDir && (await checkFileExists(cacheDir))) {
-                await fsPromises.rm(cacheDir, { recursive: true, force: true });
-                logger.info('删除缓存目录：', gray(cacheDir));
-              }
-            } catch (error) {
-              const errorMsg = `删除缓存目录失败: ${(error as Error).message}`;
-              logger.error(errorMsg, gray(item.cacheDir));
-              errors.push(errorMsg);
-            }
-          }
-
-          if (deleteVideo) {
-            try {
-              // 优先使用 item.localVideo（实际文件路径）
-              if (item.localVideo) {
-                const filepath = item.localVideo;
-                if (await checkFileExists(filepath)) {
-                  try {
-                    await fsPromises.rm(filepath, { recursive: true, force: true });
-                    logger.info('删除文件：', gray(filepath));
-                  } catch (error) {
-                    const errorMsg = `删除文件失败: ${filepath}, 错误: ${(error as Error).message}`;
-                    logger.error(errorMsg);
-                    errors.push(errorMsg);
-                    // 如果直接删除失败，可能是文件被占用
-                  }
-                }
-              } else {
-                // 如果 localVideo 不存在，尝试使用 dlOptions 构建路径（格式化后的参数更准确）
-                const saveDir = item.dlOptions?.saveDir || item.options?.saveDir;
-                const filename = item.dlOptions?.filename || item.options?.filename;
-
-                if (saveDir && filename) {
-                  // 尝试多种可能的扩展名
-                  for (const ext of ['', '.ts', '.mp4']) {
-                    const filepath = resolve(saveDir, filename + ext);
-                    if (await checkFileExists(filepath)) {
-                      try {
-                        await fsPromises.rm(filepath, { recursive: true, force: true });
-                        logger.info('删除文件：', gray(filepath));
-                        break; // 找到并删除后退出循环
-                      } catch (error) {
-                        const errorMsg = `删除文件失败: ${filepath}, 错误: ${(error as Error).message}`;
-                        logger.error(errorMsg);
-                        errors.push(errorMsg);
-                      }
-                    }
-                  }
-                } else {
-                  const errorMsg = `无法确定文件路径: saveDir=${saveDir}, filename=${filename}`;
-                  logger.warn(errorMsg, gray(url));
-                  errors.push(errorMsg);
-                }
-              }
-            } catch (error) {
-              const errorMsg = `删除视频文件时发生错误: ${(error as Error).message}`;
-              logger.error(errorMsg, gray(url));
-              errors.push(errorMsg);
-            }
-          }
+      for (const url of req.body.urls || []) {
+        const item = this.tasks.get(url);
+        if (!item) continue;
+        this.tasks.delete(url);
+        const run = this.runs.get(url);
+        run?.controller.abort();
+        if (run) await run.completion;
+        if (req.body.deleteCache) {
+          const target = resolve(this.cacheDir, md5(url));
+          if (target !== this.cacheDir && target.startsWith(`${this.cacheDir}${sep}`))
+            await fs.rm(target, { recursive: true, force: true });
         }
-      }
-
-      if (list.length) {
-        this.wsSend('delete', list);
-        this.saveCache();
-        this.startNextPending();
-      }
-      const lang = this.getLangFromRequest(req);
-      const message = errors.length
-        ? `${t('api.success.deleted', lang, { count: list.length })}，但有 ${errors.length} 个错误: ${errors.join('; ')}`
-        : t('api.success.deleted', lang, { count: list.length });
-      res.json({ message, code: errors.length > 0 ? 1 : 0, count: list.length, errors: errors.length > 0 ? errors : undefined });
-    });
-
-    // API to rename download file
-    app.post('/api/rename', async (req, res) => {
-      const { url, newFilename } = req.body;
-      const lang = this.getLangFromRequest(req);
-
-      if (!url || !newFilename) {
-        res.json({ code: 1001, message: t('api.error.invalidParams', lang) });
-        return;
-      }
-
-      // 检查新文件名是否包含非法字符
-      const invalidChars = /[<>:"/\\|?*]/;
-      if (invalidChars.test(newFilename)) {
-        res.json({ code: 1004, message: t('api.error.invalidFilename', lang) });
-        return;
-      }
-
-      const item = this.dlCache.get(url);
-      if (!item) {
-        res.json({ code: 1002, message: t('api.error.taskNotFound', lang) });
-        return;
-      }
-
-      await this.checkItemStatus(item);
-
-      // 只允许重命名已完成且状态正常的任务
-      if (item.status !== 'done' || item.errmsg) {
-        logger.error('rename failed:', item.status, red(item.errmsg), gray(url));
-        res.json({ code: 1003, message: t('api.error.onlyRenameCompleted', lang) });
-        return;
-      }
-
-      try {
-        const oldPath = item.localVideo;
-        const oldDir = dirname(oldPath);
-        const oldExt = oldPath.split('.').pop() || '';
-        const newFilenameBase = newFilename.replace(/\.[^.]+$/, '');
-        const newPath = resolve(oldDir, `${newFilenameBase}${oldExt ? `.${oldExt}` : ''}`);
-
-        // 检查新文件名是否已存在
-        if (await checkFileExists(newPath)) {
-          res.json({ code: 1007, message: t('api.error.fileExists', lang) });
-          return;
-        }
-
-        // 重命名文件
-        await fsPromises.rename(oldPath, newPath);
-        logger.debug('重命名文件：', gray(oldPath), '->', cyan(newPath));
-
-        // 更新任务信息
-        item.localVideo = newPath;
-        item.options.filename = item.filename = basename(newPath);
-
-        this.dlCache.set(url, item);
-        this.saveCache();
-        this.wsSend('progress', url);
-
-        res.json({ message: t('api.success.renamed', lang), code: 0 });
-      } catch (error) {
-        logger.error('重命名失败:', error);
-        res.json({ code: 1006, message: t('api.error.renameFailed', lang, { error: (error as Error).message }) });
-      }
-    });
-
-    app.get(/^\/localplay\/(.*)$/, async (req, res) => {
-      let filepath = decodeURIComponent(req.params[0]);
-
-      if (filepath) {
-        let ext = filepath.split('.').pop();
-        if (!ext) {
-          ext = 'm3u8';
-          if (!(await checkFileExists(filepath))) filepath += '.m3u8';
-        }
-
-        const allowedDirs = [this.options.cacheDir, this.cfg.dlOptions.saveDir];
-
-        if (!(await checkFileExists(filepath))) {
-          for (const dir of allowedDirs) {
-            const tpath = resolve(dir, filepath);
-            if (await checkFileExists(tpath)) {
-              filepath = tpath;
-              break;
-            }
-          }
-        } else {
-          filepath = resolve(filepath);
-          const isAllow = !this.options.limitFileAccess || allowedDirs.some(d => filepath.startsWith(resolve(d)));
-
-          if (!isAllow) {
-            logger.error('[Localplay] Access denied:', filepath);
-            const lang = this.getLangFromRequest(req);
-            res.send({ message: t('api.error.accessDenied', lang), code: 403 });
-            return;
-          }
-        }
-
-        if (await checkFileExists(filepath)) {
-          const stats = await fsPromises.stat(filepath);
-          const headers = new Headers({
-            'Last-Modified': stats.mtime.toUTCString(),
-            'Access-Control-Allow-Headers': '*',
-            'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Credentials': 'true',
-            'Content-Length': String(stats.size),
-            'Content-Type':
-              ext === 'ts' ? 'video/mp2t' : ext === 'm3u8' ? 'application/vnd.apple.mpegurl' : ext === 'mp4' ? 'video/mp4' : 'text/plain',
+        if (req.body.deleteVideo && item.localVideo)
+          await fs.unlink(item.localVideo).catch(error => {
+            if (error.code !== 'ENOENT') throw error;
           });
-          res.setHeaders(headers);
-
-          if (ext === 'm3u8' || ('ts' === ext && stats.size < 1024 * 1024 * 3)) {
-            const data = await fsPromises.readFile(filepath);
-            res.send(data);
-            logger.debug('[Localplay]file sent:', gray(filepath), 'Size:', stats.size, 'bytes');
-          } else {
-            res.sendFile(filepath);
-          }
-          return;
-        }
       }
-
-      logger.error('[Localplay]file not found:', red(filepath));
-      const lang = this.getLangFromRequest(req);
-      res.status(404).send({ message: t('api.error.notFound', lang), code: 404 });
+      this.persist();
+      this.broadcast(true);
+      this.startNext();
+      res.json({ code: 0, message: '任务已移除' });
     });
-
-    app.post('/api/getM3u8Urls', (req, res) => {
-      const { url, headers, subUrlRegex } = req.body;
-      const lang = this.getLangFromRequest(req);
-
-      if (!url) {
-        res.json({ code: 1001, message: t('api.error.invalidUrl', lang) });
-      } else {
-        getM3u8Urls({ url, headers, subUrlRegex })
-          .then(d => res.json({ code: 0, data: Array.from(d) }))
-          .catch(err => res.json({ code: 401, message: (err as Error).message }));
+    app.get('/api/file', async (req, res) => {
+      const item = this.tasks.get(String(req.query.url));
+      if (item?.status !== 'done' || !item.localVideo || !(await checkFileExists(item.localVideo))) {
+        res.status(404).json({ code: 1, message: '文件不存在或尚未完成合并' });
+        return;
       }
+      res.download(resolve(item.localVideo), basename(item.localVideo));
     });
+  }
+  async close() {
+    this.closing = true;
+    for (const run of this.runs.values()) run.controller.abort();
+    await Promise.allSettled([...this.runs.values()].map(run => run.completion));
+    clearTimeout(this.saveTimer);
+    clearTimeout(this.broadcastTimer);
+    await this.flush();
+    for (const client of this.wss.clients) client.terminate();
+    this.wss.close();
+    await new Promise<void>(done => this.server.close(() => done()));
   }
 }
