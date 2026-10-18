@@ -4,12 +4,15 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, resolve, sep } from 'node:path';
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer } from 'ws';
+import { downloadResource } from '../lib/download.js';
 import { formatOptions } from '../lib/format-options.js';
+import { extractMedia } from '../lib/getM3u8Urls.js';
 import { initProxy } from '../lib/init-proxy.js';
-import { m3u8Download } from '../lib/m3u8-download.js';
 import { checkFileExists, formatHeaders, logger, md5, normalizeDownloadUrl } from '../lib/utils.js';
 import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.js';
 import type { M3u8DLOptions } from '../types/m3u8.js';
+import { VideoParser } from '../video-parser/index.js';
+import { sourceUrl } from '../video-parser/platform.js';
 
 interface DLServerOptions {
   port?: number;
@@ -38,6 +41,7 @@ export class DLServer {
   private writeQueue = Promise.resolve();
   private version = '1.10.0';
   private closing = false;
+  private extractions = new Set<AbortController>();
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -152,7 +156,7 @@ export class DLServer {
     return this.writeQueue;
   }
   private async enqueue(input: string, options: M3u8DLOptions = {}) {
-    const url = normalizeDownloadUrl(input);
+    const url = sourceUrl(input);
     const existing = this.tasks.get(url);
     if (this.runs.has(url) || existing?.status === 'done') return;
     const merged = { ...existing?.options, ...options } as M3u8DLOptions;
@@ -177,6 +181,7 @@ export class DLServer {
       mergeMessage: '',
       mergeProgress: 0,
       filename: formatted.options.filename,
+      downloadType: ['file', 'parser'].includes(formatted.options.type) ? 'file' : 'm3u8',
       options: { ...merged, filename: formatted.options.filename },
       cacheDir: resolve(this.cacheDir, md5(url)),
     };
@@ -207,7 +212,7 @@ export class DLServer {
     try {
       const options = item.options as M3u8DLOptions;
       const headers = { ...formatHeaders(this.cfg.headers), ...formatHeaders(options?.headers) };
-      const result = await m3u8Download(item.url, {
+      const result = await downloadResource(item.url, {
         ...this.cfg,
         ...options,
         headers,
@@ -237,7 +242,7 @@ export class DLServer {
         item.errmsg = '';
       } else {
         item.status = 'error';
-        item.errmsg = '未生成合并文件，缓存已保留';
+        item.errmsg = '未生成完整文件，缓存已保留';
       }
       item.endTime = Date.now();
     } catch (error) {
@@ -251,6 +256,46 @@ export class DLServer {
   }
   private routes() {
     const app = this.app;
+    app.get('/api/platforms', (_req, res) => res.json({ code: 0, data: VideoParser.getSupportedPlatforms() }));
+    app.post(['/api/extract', '/api/getM3u8Urls', '/api/parse'], async (req, res) => {
+      if (this.closing) throw new Error('服务正在关闭');
+      const controller = new AbortController();
+      this.extractions.add(controller);
+      const abort = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      res.once('close', abort);
+      try {
+        const headers = { ...formatHeaders(this.cfg.headers), ...formatHeaders(req.body.headers) };
+        if (req.path === '/api/parse') {
+          const result = await VideoParser.parse(String(req.body.url || ''), headers, {
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
+          });
+          res.json(result);
+          return;
+        }
+        if (req.body.deep !== undefined && (!Number.isInteger(req.body.deep) || req.body.deep < 0 || req.body.deep > 3))
+          throw new Error('搜索深度应为 0–3');
+        const pathFilter = req.body.pathFilter || req.body.subUrlRegex || '';
+        if (typeof pathFilter !== 'string' || pathFilter.length > 200) throw new Error('子页面路径筛选最多 200 个字符');
+        const result = await extractMedia({
+          url: req.body.url,
+          urls: req.body.urls,
+          headers,
+          deep: req.body.deep ?? 1,
+          maxPages: 30,
+          maxUrls: 100,
+          pathFilter,
+          signal: controller.signal,
+        });
+        res.json({ code: 0, data: req.path === '/api/getM3u8Urls' ? result.items.map(item => [item.url, item.title]) : result });
+      } catch (error) {
+        if (!res.destroyed) throw error;
+      } finally {
+        res.removeListener('close', abort);
+        this.extractions.delete(controller);
+      }
+    });
     app.get('/api/config', (_req, res) => res.json({ code: 0, data: this.cfg }));
     app.post('/api/config', async (req, res) => {
       const next = { ...this.cfg };
@@ -331,8 +376,11 @@ export class DLServer {
       if (!Array.isArray(list) || !list.length || list.length > 100) throw new Error('每次请添加 1–100 个下载链接');
       // Validate the entire batch before creating tasks.
       for (const item of list) {
-        normalizeDownloadUrl(item.url);
+        sourceUrl(item.url);
+        if (item.sourceUrl) normalizeDownloadUrl(item.sourceUrl);
+        if (item.headerSourceUrl) normalizeDownloadUrl(item.headerSourceUrl);
         formatHeaders(item.headers);
+        await formatOptions(item.url, item);
       }
       for (const { url, ...options } of list) await this.enqueue(url, options);
       res.json({ code: 0, message: '已加入下载队列' });
@@ -395,6 +443,7 @@ export class DLServer {
   }
   async close() {
     this.closing = true;
+    for (const controller of this.extractions) controller.abort();
     for (const run of this.runs.values()) run.controller.abort();
     await Promise.allSettled([...this.runs.values()].map(run => run.completion));
     clearTimeout(this.saveTimer);

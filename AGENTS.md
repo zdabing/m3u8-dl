@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库为精简后的 M3U8/HLS 下载与合并工具。保留 CLI、SDK、WebUI 和服务端；不要重新引入播放器、平台解析、搜索、网页浏览、AriaNg、Electron 或外部 CDN。
+本仓库为 M3U8/HLS 与媒体直链下载工具。保留 CLI、SDK、WebUI、服务端，并恢复平台分享链接解析和网页媒体地址提取；不要重新引入播放器、搜索站、内嵌网页浏览器、AriaNg、Electron 或外部 CDN。
 
 ## 命令
 
@@ -13,6 +13,8 @@
 - src/lib/utils.ts：请求头归一化、自动 Referer/User-Agent、HTTP 超时重试/重定向与取消。手动请求头优先；空 Referer 禁用自动值。HTTP 状态错误不能吞掉。
 - parseM3u8.ts：M3U8、EXT-X-MAP、字节范围与 AES 密钥。落盘前完成解密；AES-128 没有显式 IV 时按媒体序号推导。
 - m3u8-download.ts：有上限的异步下载任务，不使用 worker_threads。暂停通过 AbortSignal，缓存仅在成功合并后清理。
+- download.ts / file-download.ts：统一分流 HLS 与普通文件直链。普通文件流式落盘，续传必须校验 Range 和 ETag / Last-Modified；不支持或不匹配时重下，只有完整文件才发布。不经 FFmpeg，不把字幕改成视频后缀。
+- video-parser/ 与 lib/getM3u8Urls.ts：平台解析和有深度、页面数、大小及超时限制的网页提取。仅解析页面/JSON，不执行远程脚本；跨来源媒体和子页面不得转发 Cookie/Authorization。平台接口变化应给出明确错误，不保证所有分享链接可用。
 - m3u8-convert.ts / merge-process.ts：流式输入 FFmpeg、单合并队列、进度和无进展超时。禁止同步执行 FFmpeg、整文件读取视频、把失败半成品发布为完成。进程结束、流结束、取消与临时文件清理均须覆盖，合并锁必须在 finally 释放。
 - server/download-server.ts：持久化、有限并发队列、REST 与 WebSocket。暂停/移除后等待任务终止，避免旧回调覆盖新任务。
 - packages/frontend/src：App.vue、AppIcon.vue 和普通 CSS；不使用 Pinia、Router、Tailwind 或字体 CDN。移动端输入、按钮与弹窗需要实测。

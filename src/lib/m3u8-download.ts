@@ -3,19 +3,20 @@ import { resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { SegmentProgress, SegmentSnapshot } from '../types/contract.js';
 import type { M3u8DLOptions, M3u8DLProgressStats, M3u8DLResult } from '../types/m3u8.js';
+import { activeDownloads as active } from './download-control.js';
 import { formatOptions } from './format-options.js';
 import { m3u8Convert } from './m3u8-convert.js';
 import { parseM3U8 } from './parseM3u8.js';
 import { tsDownload } from './ts-download.js';
 import { formatByteSize, logger, md5 } from './utils.js';
 
-const active = new Map<string, AbortController>();
 export function m3u8DLStop(url: string) {
   active.get(url)?.abort();
 }
 
-export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}): Promise<M3u8DLResult> {
-  const { url, options, urlMd5 } = await formatOptions(input, supplied);
+export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, sourceIdentity?: string): Promise<M3u8DLResult> {
+  const { url, options } = await formatOptions(input, { ...supplied, type: 'm3u8' });
+  const urlMd5 = md5(sourceIdentity || url);
   if (active.has(url)) throw new Error('该链接正在下载，请先暂停现有任务');
   const controller = new AbortController();
   const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
@@ -48,6 +49,7 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}):
     }, 500);
   };
   const stats: M3u8DLProgressStats = {
+    downloadType: 'm3u8',
     url,
     phase: 'parsing',
     startTime: Date.now(),

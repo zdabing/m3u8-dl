@@ -52,3 +52,7 @@ pnpm-lock.yaml
 eslintWhitelist.json
 tsCheckWhiteList.json
 .grs.config.js
+
+# Local AI agent skills
+.agents/
+skills-lock.json

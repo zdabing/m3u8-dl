@@ -14,6 +14,7 @@ export interface SegmentSnapshot {
   items: SegmentProgress[];
 }
 export interface DownloadStats {
+  downloadType?: 'm3u8' | 'file';
   startTime?: number;
   endTime?: number;
   progress?: number;
@@ -36,6 +37,9 @@ export interface DownloadStats {
   errmsg?: string;
 }
 export interface TaskOptions {
+  type?: 'auto' | 'm3u8' | 'file' | 'parser';
+  sourceUrl?: string;
+  headerSourceUrl?: string;
   filename?: string;
   saveDir?: string;
   ignoreSegments?: string;
@@ -72,4 +76,31 @@ export interface ApiResponse<T = unknown> {
   code: number;
   message?: string;
   data?: T;
+}
+export interface VideoInfo {
+  url: string;
+  title: string;
+  referer?: string;
+  platform?: string;
+  author?: string;
+  avatar?: string;
+  time?: number;
+  uid?: string;
+  like?: number;
+  cover?: string;
+  music?: { author: string; avatar: string };
+}
+export interface ExtractedMedia {
+  url: string;
+  title: string;
+  source: string;
+  credentialSource?: string;
+  type: 'm3u8' | 'file';
+  platform?: string;
+}
+export interface ExtractionResult {
+  items: ExtractedMedia[];
+  errors: { url: string; message: string }[];
+  pagesVisited: number;
+  truncated: boolean;
 }
