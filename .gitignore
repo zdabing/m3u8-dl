@@ -56,3 +56,4 @@ tsCheckWhiteList.json
 # Local AI agent skills
 .agents/
 skills-lock.json
+.env

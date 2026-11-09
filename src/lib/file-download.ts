@@ -1,4 +1,5 @@
-import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { type BigIntStats, createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 import { Transform } from 'node:stream';
@@ -7,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { M3u8DLOptions, M3u8DLProgressStats, M3u8DLResult } from '../types/m3u8.js';
 import { activeDownloads } from './download-control.js';
 import { formatOptions } from './format-options.js';
+import { m3u8Download } from './m3u8-download.js';
 import { checkFileExists, formatByteSize, formatHeaders, getResponse, HttpError, md5 } from './utils.js';
 
 /** Raised when a direct-file URL actually returns an HLS playlist, so the caller can retry as HLS. */
@@ -17,17 +19,29 @@ interface FileState {
   modified?: string;
   total?: number;
 }
-/** What this URL published next to the output, so a same-named file from another link never matches. */
+/** One owner per output, tied to the actual file even if another publisher replaces it. */
 interface PublishedMarker {
+  version: 1;
   url: string;
   size: number;
+  fileId: string;
   etag?: string;
   modified?: string;
 }
 class RestartDownload extends Error {}
+const fileIdentity = (info: BigIntStats) => `${info.dev}:${info.ino}:${info.mtimeNs}`;
 
-/** Download a direct file without buffering it or passing it through FFmpeg. */
+/** Stream a direct file; an HLS response switches to the playlist downloader after releasing its request. */
 export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, sourceIdentity?: string): Promise<M3u8DLResult> {
+  try {
+    return await downloadFile(input, supplied, sourceIdentity);
+  } catch (error) {
+    if (!(error instanceof PlaylistResponse)) throw error;
+    return m3u8Download(input, { ...supplied, type: 'm3u8' }, sourceIdentity);
+  }
+}
+
+async function downloadFile(input: string, supplied: M3u8DLOptions, sourceIdentity?: string): Promise<M3u8DLResult> {
   const { url, options } = await formatOptions(input, { ...supplied, type: 'file' });
   const urlMd5 = md5(sourceIdentity || url);
   if (activeDownloads.has(url)) throw new Error('该链接正在下载，请先暂停现有任务');
@@ -38,6 +52,7 @@ export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, 
   const partial = resolve(cacheDir, 'download.part');
   const statePath = resolve(cacheDir, 'file.json');
   const target = resolve(options.saveDir, options.filename);
+  const marker = resolve(options.saveDir, `.${md5(process.platform === 'win32' ? target.toLowerCase() : target)}.download.json`);
   const stats: M3u8DLProgressStats = {
     url,
     filename: options.filename,
@@ -78,20 +93,26 @@ export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, 
   };
   try {
     signal.throwIfAborted();
-    // The marker records what this URL published, so a same-named file from another link cannot match.
-    const marker = resolve(options.saveDir, `.${options.filename}.${urlMd5}.json`);
     if (!options.force && (await checkFileExists(target))) {
-      const published: PublishedMarker | undefined = await fs.readFile(marker, 'utf8').then(
-        (text): PublishedMarker => JSON.parse(text),
-        (): undefined => undefined
-      );
-      const info = await fs.stat(target);
+      let published: PublishedMarker;
+      try {
+        published = JSON.parse(await fs.readFile(marker, 'utf8'));
+      } catch {
+        // Missing, legacy or interrupted metadata is never proof that the file is ours.
+      }
+      const info = await fs.stat(target, { bigint: true });
       const resumable = await fs.stat(partial).then(
         () => true,
         () => false
       );
-      if (published?.url === url && !resumable && published.size === info.size) {
-        stats.downloadedSize = stats.size = info.size;
+      if (
+        published?.version === 1 &&
+        published.url === url &&
+        !resumable &&
+        published.size === Number(info.size) &&
+        published.fileId === fileIdentity(info)
+      ) {
+        stats.downloadedSize = stats.size = Number(info.size);
         stats.phase = 'done';
         report();
         return { ...result, filepath: target, isExist: true };
@@ -197,20 +218,30 @@ export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, 
         if (!stats.downloadedSize) throw new Error('服务器返回了空文件');
         signal.throwIfAborted();
         // Rename within the output directory also works when cache and output use different drives.
-        const publishing = resolve(options.saveDir, `.${urlMd5}.download.part`);
-        // The marker lives next to the output so delCache can keep the cache directory empty.
-        const marker = resolve(options.saveDir, `.${options.filename}.${urlMd5}.json`);
+        const publishing = resolve(options.saveDir, `.${randomUUID()}.download.part`);
+        const markerPart = `${publishing}.json`;
         try {
           await pipeline(createReadStream(partial), createWriteStream(publishing), { signal });
-          signal.throwIfAborted();
-          // rename replaces an unproven same-named file atomically, so a failure never leaves it truncated.
-          await fs.rename(publishing, target);
+          const publishedInfo = await fs.stat(publishing, { bigint: true });
           await fs.writeFile(
-            marker,
-            JSON.stringify({ url, size: stats.downloadedSize, etag, modified: state.modified } satisfies PublishedMarker)
+            markerPart,
+            JSON.stringify({
+              version: 1,
+              url,
+              size: stats.downloadedSize,
+              fileId: fileIdentity(publishedInfo),
+              etag,
+              modified: state.modified,
+            } satisfies PublishedMarker),
+            { flag: 'wx' }
           );
+          signal.throwIfAborted();
+          // Invalidate ownership before replacing bytes. A crash cannot validate the previous owner's file.
+          await fs.rm(marker, { force: true });
+          await fs.rename(publishing, target);
+          await fs.rename(markerPart, marker);
         } finally {
-          await fs.rm(publishing, { force: true });
+          await Promise.all([fs.rm(publishing, { force: true }), fs.rm(markerPart, { force: true })]);
         }
         // The marker in the output directory is what proves a later run may reuse this file.
         if (options.delCache) await fs.rm(cacheDir, { recursive: true, force: true });
@@ -223,6 +254,7 @@ export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, 
         response?.destroy();
         clearInterval(timer);
         signal.throwIfAborted();
+        if (error instanceof PlaylistResponse) throw error;
         const restart = error instanceof RestartDownload || (error instanceof HttpError && error.status === 416);
         if (restart) {
           offset = 0;
@@ -242,6 +274,7 @@ export async function fileDownload(input: string, supplied: M3u8DLOptions = {}, 
       }
     }
   } catch (error) {
+    if (error instanceof PlaylistResponse && !signal.aborted) throw error;
     if (signal.aborted) result.paused = true;
     else {
       result.errmsg = (error as Error).message || String(error);

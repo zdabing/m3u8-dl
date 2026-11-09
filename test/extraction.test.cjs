@@ -237,3 +237,35 @@ test('platform download keeps source task identity, strips CDN credentials and s
   assert.equal(complete.errmsg, undefined); assert.equal(complete.stats.url, url);
   assert.ok(ranges[1] > 0); assert.deepEqual(await fs.readFile(complete.filepath), bytes);
 });
+
+test('platform CDN playlist detection preserves source identity, cache and credential scope', async t => {
+  const dir = await temporary(t);
+  const originalParse = VideoParser.parse;
+  t.after(() => { VideoParser.parse = originalParse; });
+  const source = 'https://www.douyin.com/video/456';
+  const segment = Buffer.alloc(188 * 4, 71);
+  const requests = [];
+  const origin = await serve(t, (req, res) => {
+    requests.push(req.url);
+    assert.equal(req.headers.cookie, undefined);
+    assert.equal(req.headers.authorization, undefined);
+    assert.equal(req.headers.referer, source);
+    if (req.url === '/cdn-play') {
+      res.setHeader('content-type', 'application/vnd.apple.mpegurl');
+      res.end('#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n');
+    } else res.end(segment);
+  });
+  VideoParser.parse = async () => ({ code: 0, data: { title: '测试分享', url: origin + '/cdn-play' } });
+  const result = await downloadResource(source, {
+    saveDir: dir, cacheDir: path.join(dir, 'cache'), convert: false,
+    headers: { Cookie: 'private-cookie', Authorization: 'private-token' },
+    onProgress: (_n, _total, _item, stats) => { assert.equal(stats.url, source); },
+  });
+  assert.equal(result.errmsg, undefined);
+  assert.equal(result.stats.downloadType, 'm3u8');
+  assert.equal(result.stats.url, source);
+  assert.equal(result.stats.tsSuccess, 1);
+  assert.deepEqual(requests, ['/cdn-play', '/cdn-play', '/segment.ts']);
+  assert.ok(result.m3u8Info.data[0].tsOut.startsWith(path.join(dir, 'cache', md5(source)) + path.sep));
+  assert.deepEqual(await fs.readFile(result.m3u8Info.data[0].tsOut), segment);
+});

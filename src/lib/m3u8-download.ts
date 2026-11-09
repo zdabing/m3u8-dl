@@ -8,7 +8,7 @@ import { formatOptions } from './format-options.js';
 import { m3u8Convert } from './m3u8-convert.js';
 import { parseM3U8 } from './parseM3u8.js';
 import { tsDownload } from './ts-download.js';
-import { formatByteSize, logger, md5 } from './utils.js';
+import { formatByteSize, logger, md5, scopeCredentials } from './utils.js';
 
 export function m3u8DLStop(url: string) {
   active.get(url)?.abort();
@@ -176,7 +176,7 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
               info.crypto[segment.keyUri]
                 ? { ...info.crypto[segment.keyUri], iv: segment.iv || info.crypto[segment.keyUri].iv }
                 : undefined,
-              options.headers,
+              /^https?:\/\//i.test(url) ? scopeCredentials(url, segment.uri, options.headers) : options.headers,
               signal,
               received => {
                 const delta = received - (lastReceived.get(index) || 0);

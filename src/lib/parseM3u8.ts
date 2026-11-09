@@ -6,10 +6,11 @@ import { Parser } from 'm3u8-parser';
 import type { M3u8ContainerType, M3u8Info, M3u8MapInfo, TsItemInfo } from '../types/m3u8.js';
 import { detectContainerByFile, detectContainerByHeader, detectContainerType, getSegmentExt } from './container.js';
 import { decryptSegmentData } from './crypto.js';
-import { getRetry, isOkStatus, logger, md5, sliceByterange, withRangeHeader } from './utils.js';
+import { getRetry, isOkStatus, logger, md5, scopeCredentials, sliceByterange, withRangeHeader } from './utils.js';
 
 /** m3u8-parser 未完整导出 EXT-X-MAP 上的 key 信息，这里做类型补全 */
 type MapInfoRaw = { uri: string; byterange?: { length: number; offset: number }; key?: { method: string; uri: string; iv?: unknown } };
+type HeadersFor = (target: string) => OutgoingHttpHeaders | string | undefined;
 
 /**
  * 解析 m3u8 文件
@@ -18,8 +19,10 @@ type MapInfoRaw = { uri: string; byterange?: { length: number; offset: number };
  */
 export async function parseM3U8(content: string, cacheDir = './cache', headers?: OutgoingHttpHeaders | string, signal?: AbortSignal) {
   let url = process.cwd();
+  const credentialSource = /^https?:\/\//i.test(content) ? content : undefined;
+  const headersFor: HeadersFor = target => (credentialSource ? scopeCredentials(credentialSource, target, headers) : headers);
 
-  if (/^https?:\/\//i.test(content)) {
+  if (credentialSource) {
     const response = await getRetry<string>(content, headers, 3, signal);
     url = response.url;
     content = response.data;
@@ -50,7 +53,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
     url = new URL((maxBandwidthItem as unknown as { uri: string }).uri, url).toString();
     logger.debug('maxBandwidthItem', maxBandwidthItem, url);
 
-    const response = await getRetry<string>(url, headers, 3, signal);
+    const response = await getRetry<string>(url, headersFor(url), 3, signal);
     url = response.url;
     content = response.data;
     if (!content.trim().startsWith('#EXTM3U')) throw new Error('子播放列表无效，请检查请求头');
@@ -89,7 +92,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
   }
 
   const mapInfo = mapInfoList[0];
-  const initSegment = mapInfo?.uri ? await fetchInitSegment(mapInfo, url, cacheDir, result.crypto, headers, signal) : null;
+  const initSegment = mapInfo?.uri ? await fetchInitSegment(mapInfo, url, cacheDir, result.crypto, headersFor, signal) : null;
 
   if (initSegment) result.initSegment = initSegment;
   result.container = resolveContainer(initSegment, tsList[0].uri);
@@ -108,7 +111,7 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
     if (item.key) {
       const tsKeyInfo = item.key;
       if (!tsKeyInfo.uri.includes('://')) tsKeyInfo.uri = new URL(tsKeyInfo.uri, url).toString();
-      await fetchKeyInfo(tsKeyInfo.method, tsKeyInfo.uri, result.crypto, tsKeyInfo.iv, headers, signal);
+      await fetchKeyInfo(tsKeyInfo.method, tsKeyInfo.uri, result.crypto, tsKeyInfo.iv, headersFor(tsKeyInfo.uri), signal);
     }
 
     let byterange = item.byterange;
@@ -186,7 +189,7 @@ async function fetchInitSegment(
   baseUrl: string,
   cacheDir: string,
   crypto: M3u8Info['crypto'],
-  headers?: OutgoingHttpHeaders | string,
+  headersFor: HeadersFor,
   signal?: AbortSignal
 ): Promise<M3u8MapInfo | null> {
   const uri = mapInfo.uri.includes('://') ? mapInfo.uri : new URL(mapInfo.uri, baseUrl).toString();
@@ -195,7 +198,7 @@ async function fetchInitSegment(
   try {
     if (mapInfo.key?.uri) {
       const keyUri = mapInfo.key.uri.includes('://') ? mapInfo.key.uri : new URL(mapInfo.key.uri, baseUrl).toString();
-      await fetchKeyInfo(mapInfo.key.method, keyUri, crypto, mapInfo.key.iv, headers, signal);
+      await fetchKeyInfo(mapInfo.key.method, keyUri, crypto, mapInfo.key.iv, headersFor(keyUri), signal);
       result.keyUri = keyUri;
     }
 
@@ -210,7 +213,7 @@ async function fetchInitSegment(
     }
 
     // EXT-X-MAP 支持 BYTERANGE，此时只请求初始化段所在的字节区间
-    const r = await getRetry<Buffer>(uri, withRangeHeader(headers, mapInfo.byterange), 3, signal);
+    const r = await getRetry<Buffer>(uri, withRangeHeader(headersFor(uri), mapInfo.byterange), 3, signal);
 
     if (!isOkStatus(r.response.statusCode)) {
       logger.warn('[EXT-X-MAP][failed]', r.response.statusCode, uri, r.data);

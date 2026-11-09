@@ -37,6 +37,7 @@ export interface DownloadStats {
   errmsg?: string;
 }
 export interface TaskOptions {
+  useDefaultHeaders?: boolean;
   type?: 'auto' | 'm3u8' | 'file' | 'parser';
   sourceUrl?: string;
   headerSourceUrl?: string;

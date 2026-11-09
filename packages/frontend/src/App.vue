@@ -94,7 +94,7 @@ function bytes(value = 0) {
   return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${['B', 'KB', 'MB', 'GB'][index]}`;
 }
 function host(url: string) { try { return new URL(url).hostname; } catch { return url; } }
-function isFile(task: TaskItem) { return task.downloadType === 'file' || task.options?.type === 'file'; }
+function isFile(task: TaskItem) { return task.downloadType ? task.downloadType === 'file' : task.options?.type === 'file'; }
 function kind(task: TaskItem) { return isFile(task) ? /\.([a-z0-9]{1,5})$/i.exec(task.filename || '')?.[1].toUpperCase() || 'FILE' : 'HLS'; }
 function detailLabel(task: TaskItem) { return `查看 ${name(task)} 的${isFile(task) ? '下载' : '分片'}详情`; }
 function name(task: TaskItem) {

@@ -166,13 +166,18 @@ export function getResponse(
   if (request) outgoing['content-length'] = Buffer.byteLength(request.body);
   return openStream(normalized, outgoing, signal, 0, request?.method, request?.body);
 }
-/** Scope credentials to the page that supplied them; a Referer remains useful on its CDN. */
-export function headersForTarget(source: string, target: string, input?: OutgoingHttpHeaders | string) {
+/** Do not reuse credentials for a URL at a different origin. */
+export function scopeCredentials(source: string, target: string, input?: OutgoingHttpHeaders | string) {
   const headers = formatHeaders(input);
   if (new URL(source).origin !== new URL(target).origin) {
     delete headers.cookie;
     delete headers.authorization;
   }
+  return headers;
+}
+/** Scope credentials to the page that supplied them; a Referer remains useful on its CDN. */
+export function headersForTarget(source: string, target: string, input?: OutgoingHttpHeaders | string) {
+  const headers = scopeCredentials(source, target, input);
   if (headers.referer === undefined) headers.referer = source;
   return headers;
 }

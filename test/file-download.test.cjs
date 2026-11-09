@@ -225,17 +225,79 @@ test('a failed replacement keeps the previous same-named file intact', async t =
   assert.deepEqual(await fs.readFile(path.join(dir, 'video.mp4')), previous);
 });
 
-test('an extensionless link that serves a playlist is downloaded as HLS, not saved as video', async t => {
+for (const [resource, type, download] of [['/play?id=1', 'file', downloadResource], ['/play.mp4', 'auto', downloadResource], ['/play-sdk', 'file', fileDownload]]) test(`a direct-file playlist falls back to HLS: ${resource}`, async t => {
   const dir = await temporary(t);
   const segment = Buffer.alloc(188 * 4, 71);
+  const requests = [];
   const origin = await serve(t, (req, res) => {
+    requests.push(req.url);
     if (req.url.startsWith('/play')) { res.setHeader('content-type', 'application/vnd.apple.mpegurl'); res.end('#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST\n'); return; }
     res.setHeader('content-type', 'video/mp2t'); res.end(segment);
   });
-  const result = await downloadResource(`${origin}/play?id=1`, options(dir, { filename: 'show.mp4', convert: false }));
+  const result = await download(`${origin}${resource}`, options(dir, { type, filename: 'show.mp4', convert: false }));
+  assert.equal(result.errmsg, undefined);
   assert.equal(result.stats.downloadType, 'm3u8');
+  assert.equal(result.stats.phase, 'done');
+  assert.equal(result.stats.tsSuccess, 1);
   assert.notEqual(result.isExist, true);
+  assert.deepEqual(requests, [resource, resource, '/seg.ts']);
+  assert.deepEqual(await fs.readFile(result.m3u8Info.data[0].tsOut), segment);
   // The playlist itself must never be published as the video file.
   const published = await fs.readFile(path.join(dir, 'show.mp4'), 'utf8').catch(() => '');
   assert.ok(!published.startsWith('#EXTM3U'));
+});
+
+test('same-size replacements invalidate the previous URL ownership and still reuse the current file', async t => {
+  const dir = await temporary(t);
+  const requests = [];
+  const origin = await serve(t, (req, res) => {
+    requests.push(req.url);
+    res.end(Buffer.alloc(1024, req.url.startsWith('/a/') ? 65 : 66));
+  });
+  const opts = options(dir, { filename: 'shared.mp4' });
+  for (const prefix of ['a', 'b', 'a']) {
+    const result = await downloadResource(`${origin}/${prefix}/video.mp4`, opts);
+    assert.equal(result.errmsg, undefined);
+    assert.notEqual(result.isExist, true);
+    assert.deepEqual(await fs.readFile(result.filepath), Buffer.alloc(1024, prefix === 'a' ? 65 : 66));
+  }
+  const again = await downloadResource(`${origin}/a/video.mp4`, opts);
+  assert.equal(again.isExist, true);
+  assert.deepEqual(requests, ['/a/video.mp4', '/b/video.mp4', '/a/video.mp4']);
+});
+
+test('invalid publication metadata triggers a fresh download rather than blocking retries', async t => {
+  const dir = await temporary(t);
+  let requests = 0;
+  const origin = await serve(t, (_req, res) => { requests++; res.end(Buffer.alloc(1024, 71)); });
+  const url = `${origin}/video.mp4`;
+  await downloadResource(url, options(dir));
+  const marker = (await fs.readdir(dir)).find(name => name.startsWith('.') && name.endsWith('.json'));
+  assert.ok(marker);
+  for (const invalid of ['{"url":', 'null', '[]', JSON.stringify({ url, size: 1024 })]) {
+    await fs.writeFile(path.join(dir, marker), invalid);
+    const result = await downloadResource(url, options(dir));
+    assert.equal(result.errmsg, undefined);
+    assert.notEqual(result.isExist, true);
+    assert.deepEqual(await fs.readFile(result.filepath), Buffer.alloc(1024, 71));
+  }
+  assert.equal(requests, 5);
+  assert.equal((await downloadResource(url, options(dir))).isExist, true);
+  assert.ok(!(await fs.readdir(dir)).some(name => name.endsWith('.part')));
+});
+
+test('publication metadata cannot validate an externally replaced file of the same size', async t => {
+  const dir = await temporary(t);
+  let requests = 0;
+  const origin = await serve(t, (_req, res) => { requests++; res.end(Buffer.alloc(1024, 65)); });
+  const url = `${origin}/video.mp4`;
+  const first = await downloadResource(url, options(dir));
+  const replacement = path.join(dir, 'replacement.mp4');
+  await fs.writeFile(replacement, Buffer.alloc(1024, 66));
+  await fs.rename(replacement, first.filepath);
+  const next = await downloadResource(url, options(dir));
+  assert.equal(next.errmsg, undefined);
+  assert.notEqual(next.isExist, true);
+  assert.equal(requests, 2);
+  assert.deepEqual(await fs.readFile(next.filepath), Buffer.alloc(1024, 65));
 });

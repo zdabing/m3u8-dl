@@ -9,5 +9,5 @@ services:
       - ./downloads:/app/downloads
       - ./cache:/app/cache
     environment:
-      DS_SECRET: '' # 可设置访问密码
+      DS_SECRET: "${DS_SECRET:-}" # 猫抓接收需要设置访问密码
     restart: unless-stopped

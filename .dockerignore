@@ -5,3 +5,4 @@ tmp
 cache
 downloads
 *.log
+**/.env

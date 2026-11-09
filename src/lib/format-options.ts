@@ -3,6 +3,29 @@ import type { M3u8DLOptions } from '../types/m3u8.js';
 import { detectPlatform, sourceUrl } from '../video-parser/platform.js';
 import { formatHeaders, md5, normalizeDownloadUrl } from './utils.js';
 
+export const directFileExtensions = [
+  '.mp4',
+  '.mkv',
+  '.mov',
+  '.m4v',
+  '.avi',
+  '.flv',
+  '.webm',
+  '.wmv',
+  '.ts',
+  '.m4s',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.aac',
+  '.flac',
+  '.vtt',
+  '.srt',
+  '.ass',
+  '.ssa',
+];
+
 export async function formatOptions(input: string, opts: M3u8DLOptions = {}) {
   const url =
     /^https?:\/\//i.test(input) && !/\s/.test(input.trim())
@@ -18,41 +41,19 @@ export async function formatOptions(input: string, opts: M3u8DLOptions = {}) {
     /* Local HLS or encoded filename. */
   }
   const remoteExt = extname(remoteName).toLowerCase();
-  const fileExtensions = [
-    '.mp4',
-    '.mkv',
-    '.mov',
-    '.m4v',
-    '.avi',
-    '.flv',
-    '.webm',
-    '.wmv',
-    '.ts',
-    '.m4s',
-    '.mp3',
-    '.wav',
-    '.ogg',
-    '.m4a',
-    '.aac',
-    '.flac',
-    '.vtt',
-    '.srt',
-    '.ass',
-    '.ssa',
-  ];
   const type =
     opts.type && opts.type !== 'auto'
       ? opts.type
       : detectPlatform(url).platform !== 'unknown'
         ? 'parser'
-        : fileExtensions.includes(remoteExt)
+        : directFileExtensions.includes(remoteExt)
           ? 'file'
           : 'm3u8';
   // biome-ignore lint/suspicious/noControlCharactersInRegex: Windows filenames cannot contain control characters.
   const invalidCharacters = /[<>:"/\\|?*\x00-\x1f]/g;
   const filename = basename(opts.filename?.trim() || (type === 'file' ? remoteName : '') || md5(url)).replace(invalidCharacters, '_');
   // Only a known media suffix counts as an extension: "1.10" or "v1.2" would otherwise ship without a suffix.
-  const knownSuffixes = [...fileExtensions, '.txt'];
+  const knownSuffixes = [...directFileExtensions, '.txt'];
   const hasKnownExtension = knownSuffixes.some(suffix => filename.toLowerCase().endsWith(suffix));
   const usableRemoteExt = knownSuffixes.includes(remoteExt) ? remoteExt : '';
   const options: M3u8DLOptions = {

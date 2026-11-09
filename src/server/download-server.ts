@@ -13,6 +13,7 @@ import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.
 import type { M3u8DLOptions } from '../types/m3u8.js';
 import { VideoParser } from '../video-parser/index.js';
 import { sourceUrl } from '../video-parser/platform.js';
+import { catCatchTasks } from './cat-catch.js';
 
 interface DLServerOptions {
   port?: number;
@@ -155,10 +156,10 @@ export class DLServer {
       });
     return this.writeQueue;
   }
-  private async enqueue(input: string, options: M3u8DLOptions = {}) {
+  private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}) {
     const url = sourceUrl(input);
     const existing = this.tasks.get(url);
-    if (this.runs.has(url) || existing?.status === 'done') return;
+    if (this.runs.has(url) || existing?.status === 'done') return false;
     const merged = { ...existing?.options, ...options } as M3u8DLOptions;
     const formatted = await formatOptions(url, { ...this.cfg, ...merged });
     if (!existing) {
@@ -189,6 +190,7 @@ export class DLServer {
     this.persist();
     this.broadcast(true);
     this.startNext();
+    return true;
   }
   private startNext() {
     if (this.closing) return;
@@ -211,7 +213,10 @@ export class DLServer {
   private async run(item: TaskItem, controller: AbortController) {
     try {
       const options = item.options as M3u8DLOptions;
-      const headers = { ...formatHeaders(this.cfg.headers), ...formatHeaders(options?.headers) };
+      const headers = {
+        ...(item.options?.useDefaultHeaders === false ? {} : formatHeaders(this.cfg.headers)),
+        ...formatHeaders(options?.headers),
+      };
       const result = await downloadResource(item.url, {
         ...this.cfg,
         ...options,
@@ -371,6 +376,20 @@ export class DLServer {
         },
       })
     );
+    app.post('/api/cat-catch', async (req, res) => {
+      if (!this.token.trim()) {
+        res.status(403).json({ code: 1, message: '请先设置下载器访问密码（DS_SECRET），再启用猫抓发送' });
+        return;
+      }
+      if (this.closing) throw new Error('服务正在关闭');
+      const list = catCatchTasks(req.body);
+      let added = 0;
+      for (const { url, ...options } of list) {
+        if (this.tasks.get(url)?.status === 'pending') continue;
+        if (await this.enqueue(url, { ...options, sourceUrl: undefined, headerSourceUrl: undefined })) added++;
+      }
+      res.json({ code: 0, message: `已加入 ${added} 个下载任务`, data: { added, skipped: list.length - added } });
+    });
     app.post('/api/download', async (req, res) => {
       const list = req.body.list;
       if (!Array.isArray(list) || !list.length || list.length > 100) throw new Error('每次请添加 1–100 个下载链接');
