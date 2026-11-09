@@ -1,6 +1,11 @@
-import type { ProxyAgentConfigurationType } from 'global-agent';
-import type { M3u8DLOptions } from '../types';
-import { logger } from './utils';
+import type { M3u8DLOptions } from '../types/m3u8.js';
+import { logger } from './utils.js';
+
+interface ProxyConfiguration {
+  HTTP_PROXY?: string;
+  HTTPS_PROXY?: string;
+  NO_PROXY?: string;
+}
 
 /** 初始化失败 N 次后续忽略代理配置 */
 let initializFailedTimes = 3;
@@ -13,7 +18,7 @@ export async function initProxy(options: M3u8DLOptions) {
 
   // 根据代理模式来初始化
   try {
-    const g = global as unknown as { GLOBAL_AGENT: ProxyAgentConfigurationType };
+    const g = global as unknown as { GLOBAL_AGENT: ProxyConfiguration };
     let globalAgent = g.GLOBAL_AGENT;
 
     if (!globalAgent) {
