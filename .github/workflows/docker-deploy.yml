@@ -14,6 +14,10 @@ on:
   # 支持手动触发
   workflow_dispatch:
 
+concurrency:
+  group: container-image-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # 使用 github.repository 作为镜像名称，格式为 <account>/<repo>
   IMAGE_NAME: wzbsdb/m3u8-fix # DockerHub 镜像名称

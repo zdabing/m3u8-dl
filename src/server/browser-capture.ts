@@ -52,7 +52,13 @@ export async function runBrowserCapture(
     const timeout = setTimeout(() => stop.abort(new Error('浏览器保存超时，已收到的分片仍在缓存目录')), 12 * 60 * 60 * 1000);
     const captureSignal = signal ? AbortSignal.any([stop.signal, signal]) : stop.signal;
     const segments = captureBrowserHls(context, config.origins, attempt, captureSignal, (total, captured, bytes) => {
-      progress({ phase: 'downloading', tsCount: total, tsSuccess: captured, downloadedSize: bytes, progress: Math.floor((99 * captured) / total) });
+      progress({
+        phase: 'downloading',
+        tsCount: total,
+        tsSuccess: captured,
+        downloadedSize: bytes,
+        progress: Math.floor((99 * captured) / total),
+      });
     });
     const closePage = () => stop.abort(new Error('浏览器播放页已关闭，已收到的分片仍在缓存目录'));
     page.on('close', closePage);
@@ -65,7 +71,10 @@ export async function runBrowserCapture(
         segments,
       ]);
       progress({ phase: 'merging' });
-      const filepath = await m3u8Convert({ ...options, onMergeProgress: (mergeProgress, mergeMessage) => progress({ mergeProgress, mergeMessage }) }, files);
+      const filepath = await m3u8Convert(
+        { ...options, onMergeProgress: (mergeProgress, mergeMessage) => progress({ mergeProgress, mergeMessage }) },
+        files
+      );
       if (options.delCache) await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => {});
       return { filepath, paused: false, errmsg: '' };
     } catch (error) {

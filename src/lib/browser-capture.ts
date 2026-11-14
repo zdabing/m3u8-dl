@@ -123,7 +123,9 @@ export function captureBrowserHls(
           }
         })
         .catch(error => finish(signal.aborted ? signal.reason : error))
-        .finally(() => { pending--; });
+        .finally(() => {
+          pending--;
+        });
     }
     if (signal.aborted) finish(signal.reason);
     else {
