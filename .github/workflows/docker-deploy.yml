@@ -4,6 +4,11 @@ name: 'Publish Container Image'
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - 'docker/**'
+      - '.github/workflows/docker-deploy.yml'
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'  # 更严格的版本标签匹配，如 v1.2.3
   # 支持手动触发
@@ -25,7 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
           submodules: 'recursive'
 
       - uses: actions/setup-node@v7
@@ -147,15 +151,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: |
-            ${{ env.IMAGE_NAME }}
+            name=${{ env.IMAGE_NAME }},enable=${{ steps.check-dockerhub.outputs.has-credentials == 'true' }}
             ghcr.io/${{ env.IMAGE_NAME_REPO }}
           # 生成 Docker 标签
           # 对于 tag 推送：生成 semver 标签（如 v1.2.3, 1.2.3, 1.2, 1）和 latest
-          # 对于手动触发：生成 latest 标签
+          # 主分支 Docker 改动和手动触发仅生成 latest 标签
           flavor: |
             latest=true
           tags: |
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+            type=raw,value=latest
             type=semver,pattern={{version}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
             type=semver,pattern={{major}},enable=${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
@@ -165,6 +169,34 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Build image for startup test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          build-args: USE_PREBUILT=true
+          load: true
+          tags: m3u8-dl:smoke
+          cache-from: type=gha,scope=downloader
+
+      - name: Check downloader and browser in one container
+        shell: bash
+        run: |
+          docker run -d --name m3u8-dl-smoke --shm-size=512m \
+            -p 127.0.0.1:16600:6600 -p 127.0.0.1:16080:6080 \
+            -e DS_SECRET=smoke-test -e DS_BROWSER_ORIGINS=https://example.com \
+            -e DS_BROWSER_VNC_PASSWORD=Smoke123 m3u8-dl:smoke
+          trap 'docker logs m3u8-dl-smoke; docker rm -f m3u8-dl-smoke' EXIT
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:16600/healthcheck && \
+              curl -fsS -o /dev/null http://127.0.0.1:16080/vnc.html && \
+              docker exec m3u8-dl-smoke node -e 'const s=require("node:net").connect(9323,"127.0.0.1"); s.on("connect",()=>s.end()); s.on("error",()=>process.exit(1));'; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
 
       - name: Build and push
         id: docker_build
@@ -180,8 +212,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:cache
-          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:cache,mode=max
+          cache-from: type=gha,scope=downloader
+          cache-to: type=gha,scope=downloader,mode=max
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v2

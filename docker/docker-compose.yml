@@ -1,13 +1,20 @@
 services:
   web:
+    image: "${DS_IMAGE:-ghcr.io/zdabing/m3u8-dl:latest}"
+    pull_policy: missing
     build:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
       - '6600:6600'
+      - "${DS_BROWSER_BIND:-127.0.0.1}:6080:6080"
+    shm_size: '512mb'
     volumes:
       - ./downloads:/app/downloads
       - ./cache:/app/cache
     environment:
       DS_SECRET: "${DS_SECRET:-}" # 猫抓接收需要设置访问密码
+      DS_BROWSER_ORIGINS: "${DS_BROWSER_ORIGINS:-}"
+      DS_BROWSER_VNC_PASSWORD: "${DS_BROWSER_VNC_PASSWORD:-}"
+      DS_BROWSER_WINDOW: "${DS_BROWSER_WINDOW:-}"
     restart: unless-stopped

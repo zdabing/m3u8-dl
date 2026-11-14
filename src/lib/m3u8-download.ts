@@ -8,7 +8,7 @@ import { formatOptions } from './format-options.js';
 import { m3u8Convert } from './m3u8-convert.js';
 import { parseM3U8 } from './parseM3u8.js';
 import { tsDownload } from './ts-download.js';
-import { formatByteSize, logger, md5, scopeCredentials } from './utils.js';
+import { formatByteSize, HttpError, logger, md5, scopeCredentials } from './utils.js';
 
 export function m3u8DLStop(url: string) {
   active.get(url)?.abort();
@@ -158,7 +158,8 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
       saveSegments();
     }, 500);
     let cursor = 0;
-    const errors: string[] = [];
+    let firstFailure = '';
+    let expiredFailure = '';
     const worker = async () => {
       while (cursor < queue.length && !signal.aborted) {
         const index = queue[cursor++];
@@ -196,6 +197,7 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
               throw error;
             }
             failure = error;
+            if (error instanceof HttpError && !error.retryable) break;
             if (attempt < 2) await delay(1000 * (attempt + 1), undefined, { signal });
           }
         }
@@ -205,7 +207,8 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
           state.status = 'error';
           state.size = 0;
           state.error = (failure as Error).message;
-          errors.push(state.error);
+          firstFailure ||= state.error;
+          if (failure instanceof HttpError && failure.expired) expiredFailure ||= state.error;
         } else {
           state.status = 'done';
           state.size = segment.tsSize;
@@ -226,7 +229,10 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
     clearTimeout(saveTimer);
     saveTimer = undefined;
     await flushSegments();
-    if (stats.tsFailed) throw new Error(`${stats.tsFailed} 个分片下载失败，可继续下载重试。${errors[0] || ''}`);
+    if (stats.tsFailed) {
+      const message = expiredFailure ? `。${expiredFailure}` : `，可继续下载重试。${firstFailure}`;
+      throw new Error(`${stats.tsFailed} 个分片下载失败${message}`);
+    }
     if (options.convert !== false) {
       stats.phase = 'merging';
       stats.speed = 0;

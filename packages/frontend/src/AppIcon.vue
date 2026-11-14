@@ -17,6 +17,7 @@ const paths: Record<string, string> = {
   chevron: 'm8 10 4 4 4-4',
   retry: 'M20 8a9 9 0 1 0 1 8M20 3v6h-6',
   folder: 'M3 6h7l2 3h9v11H3V6Z',
+  browser: 'M3 5h18v14H3V5Zm0 4h18M6 7h.01m3 0h.01',
   info: 'M12 11v6m0-10v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',
 };
 </script>

@@ -91,12 +91,33 @@ interface HttpResult<T> {
   data: T;
   response: { statusCode: number; statusMessage: string; headers: IncomingHttpHeaders };
 }
+function hasExpiredSignature(url: URL) {
+  const query = url.searchParams;
+  const expires = query.get('expires') || (query.has('t') ? query.get('e') : null);
+  const signed = ['token', 'sig', 'sign', 'signature'].some(name => query.has(name)) || (query.has('t') && query.has('e'));
+  return signed && /^\d{10}$/.test(expires || '') && Number(expires) * 1000 <= Date.now();
+}
 export class HttpError extends Error {
+  readonly expired: boolean;
+
   constructor(
     readonly status: number,
-    url: string
+    url: string,
+    readonly challenge = false
   ) {
-    super(`HTTP ${status}: ${url}${[401, 403, 404].includes(status) ? '（请检查链接有效期、来源页 Referer 或 Cookie）' : ''}`);
+    const target = new URL(url);
+    const accessError = [401, 403, 404].includes(status);
+    const expired = !challenge && accessError && hasExpiredSignature(target);
+    let hint = '';
+    if (challenge) hint = '站点返回了 Cloudflare 浏览器验证页，请使用来源方提供的下载链接';
+    else if (expired) hint = '链接签名已过期，请从来源重新获取有效的完整链接';
+    else if (accessError) hint = '请检查链接有效期、来源页 Referer 或 Cookie';
+    super(`HTTP ${status}: ${target.origin}${target.pathname}${hint ? `（${hint}）` : ''}`);
+    this.expired = expired;
+  }
+
+  get retryable() {
+    return !this.challenge && (this.status >= 500 || this.status === 429);
   }
 }
 async function openStream(
@@ -113,6 +134,12 @@ async function openStream(
     const req = (parsed.protocol === 'https:' ? https : http).request(parsed, { method, headers, signal, timeout: 30_000 }, res => {
       res.once('error', reject);
       res.once('aborted', () => reject(new Error('远端提前关闭响应，请重试')));
+      const challenge = res.headers['cf-mitigated'] === 'challenge';
+      if (challenge) {
+        res.resume();
+        reject(new HttpError(res.statusCode, url, true));
+        return;
+      }
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         if (redirects >= 5) {
@@ -221,7 +248,7 @@ export async function getRetry<T = string>(
       return (await requestOnce(normalized, buildRequestHeaders(normalized, headers), signal, progress)) as unknown as HttpResult<T>;
     } catch (error) {
       signal?.throwIfAborted();
-      if (attempt >= retries - 1 || (error instanceof HttpError && error.status < 500 && error.status !== 429)) throw error;
+      if (attempt >= retries - 1 || (error instanceof HttpError && !error.retryable)) throw error;
       await delay(Math.min(500 * 2 ** attempt, 3000), undefined, { signal });
     }
   }

@@ -262,7 +262,7 @@ async function downloadFile(input: string, supplied: M3u8DLOptions, sourceIdenti
           await fs.truncate(partial, 0).catch(() => {});
         }
         // Match the HLS path: 3 retries with the same capped exponential backoff.
-        if (attempt >= 3 || (error instanceof HttpError && error.status < 500 && error.status !== 429 && !restart)) throw error;
+        if (attempt >= 3 || (error instanceof HttpError && !error.retryable && !restart)) throw error;
         offset =
           state?.etag || state?.modified
             ? await fs.stat(partial).then(

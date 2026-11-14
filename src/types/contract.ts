@@ -49,6 +49,7 @@ export interface TaskOptions {
 export interface TaskItem extends DownloadStats {
   url: string;
   status: TaskStatus;
+  browserCapture?: boolean;
   cacheDir?: string;
   options?: TaskOptions;
   dlOptions?: TaskOptions;
@@ -60,6 +61,7 @@ export interface QueueStatus {
 }
 export interface ServerInfo {
   version: string;
+  browserWindow?: string;
 }
 export interface ServerConfig {
   threadNum: number;

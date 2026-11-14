@@ -179,6 +179,24 @@ test('page extraction enforces decoded size and cancels stalled requests', async
   await assert.rejects(pending, /abort/i);
 });
 
+test('web extraction reports Cloudflare challenge responses and keeps other results', async t => {
+  const origin = await serve(t, (req, res) => {
+    if (req.url === '/ok') { res.end('<video src="/movie.mp4"></video>'); return; }
+    const status = req.url.startsWith('/challenge403') ? 403 : 200;
+    res.writeHead(status, { 'cf-mitigated': 'challenge', 'content-type': 'text/html' });
+    res.end('<video src="/challenge-placeholder.mp4"></video>');
+  });
+  const urls = [origin + '/ok', origin + '/challenge403?token=fixture-secret&expires=1600000000', origin + '/challenge200'];
+  const result = await extractMedia({ url: '', urls });
+  assert.deepEqual(result.items.map(item => item.url), [origin + '/movie.mp4']);
+  assert.equal(result.errors.length, 2);
+  for (const [url, status] of [[urls[1], 403], [urls[2], 200]]) {
+    const { message } = result.errors.find(error => error.url === url);
+    assert.match(message, new RegExp(`HTTP ${status}.*Cloudflare 浏览器验证`));
+    assert.doesNotMatch(message, /签名已过期|fixture-secret/);
+  }
+});
+
 test('authenticated extraction API returns selectable results and only selected direct files enter the queue', async t => {
   let server; t.after(() => server?.close());
   const dir = await temporary(t);

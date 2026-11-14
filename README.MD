@@ -31,9 +31,24 @@ pnpm start
 - **平台分享链接**：支持抖音、微博、皮皮虾，自动识别平台并解析视频地址，可粘贴含链接的分享文本。抖音使用原有的非水印播放地址，其他平台优先采用返回的视频地址。微博需要在请求头中填写有效 Cookie。内容失效、登录限制或接口变化会返回明确错误，不能保证每条链接都能解析或无水印。
 - **网页提取**：点击顶部“网页提取”，一行填写一个播放页或分享链接，每次最多 20 个。支持页面里的 M3U8、MP4、VTT 等媒体地址、相对路径、HTML/JSON 转义地址、视频/source/track 标签及 iframe 子页。
 - **深度搜索**：可设 0–3 层，并按子页面路径文本筛选。站内链接按层搜索，iframe 可跨来源；每次最多读取 30 页、提取 100 个结果，单页解压后最多 5 MB，单页请求最多 60 秒。不会执行远程 JavaScript，因此只在脚本运行后才出现的地址可能提取不到。
-- **批量下载**：提取结果支持全选或勾选后加入队列；带上对应来源页 Referer，跨来源下载和子页面访问不转发来源页的 Cookie/Authorization。弹窗关闭或取消提取会中止请求。部分页面失败时保留其他已找到的结果并显示失败原因。
+- **批量下载**：提取结果支持全选或勾选后加入队列；带上对应来源页 Referer，跨来源下载和子页面访问不转发来源页的 Cookie/Authorization。弹窗关闭或取消提取会中止请求。部分页面失败时保留其他已找到的结果并显示失败原因。站点返回 Cloudflare 验证页时会单独提示，可改用来源方提供的下载链接。
 
 SDK 恢复 `VideoParser.parse/download/getPlatform/getSupportedPlatforms`、`getM3u8Urls`，另提供结构化 `extractMedia`；服务端提供鉴权后的 `/api/extract`、`/api/parse`、`/api/platforms`，并保留旧 `/api/getM3u8Urls` 返回格式。
+
+## 浏览器保存
+
+Docker 镜像包含下载器和浏览器。启用后，在下载器中选择「浏览器保存」，粘贴播放页、创建任务，再打开浏览器窗口从头播放。下载器保存浏览器已收到的分片，在任务列表显示进度，并在收齐后自动合并。暂停或关闭播放页会保留已写入的分片；重新开始需从头播放。
+
+播放页和媒体域名需加入 `DS_BROWSER_ORIGINS`。支持带结束标记、未加密、音视频在同一流内的 MPEG-TS HLS。切换清晰度或快进跳过分片可能导致任务无法合并。直播、独立音轨、字幕、fMP4 和加密流可按各自适用的普通下载流程处理。
+
+在 `docker` 目录的 `.env` 中设置 `DS_SECRET`（下载器密码）、`DS_BROWSER_VNC_PASSWORD`（8 位英文字母或数字）和 `DS_BROWSER_ORIGINS`（逗号分隔的来源，如 `https://player.example.com,https://media.example.com`），然后拉取镜像并启动：
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+也可以用 `docker compose up -d --build` 从源码构建。`DS_BROWSER_ORIGINS` 留空时只启动下载器。浏览器窗口默认只在宿主机通过 `http://localhost:6080/vnc.html` 打开。手机端可在私有网络中通过带身份验证的 HTTPS 反向代理访问此窗口，并把 `DS_BROWSER_WINDOW` 设为手机可打开的完整 noVNC URL。反向代理需支持 WebSocket；若代理运行在其他主机，`DS_BROWSER_BIND` 应设为代理可访问的宿主机地址。浏览器控制端口 `9323` 只监听容器内部回环地址。
 
 ## 请求头
 
@@ -55,7 +70,7 @@ SDK 恢复 `VideoParser.parse/download/getPlatform/getSupportedPlatforms`、`get
 
 在“来源与请求头”填写真实播放页面 Referer，或填写 Cookie / User-Agent。支持 JSON 对象及每行 `名称: 值`；请求头名称大小写不敏感。单任务覆盖默认设置，默认设置覆盖自动值。显式空 Referer 可关闭自动值。请求头写入服务器配置/任务记录；访问密码仅保留在浏览器会话。
 
-失败任务可编辑请求头后继续，完整下载的分片会复用。HTTP 错误保留具体状态；403/404 提示检查有效期、Referer 和 Cookie。单个网络请求在 30 秒无响应后中断。
+失败任务可编辑请求头后继续，完整下载的分片会复用。HTTP 错误显示状态码和资源路径，省略查询参数。遇到 401、403 或 404 时，如果签名链接的 `expires`（或与 `t` 配对的 `e`）已到期，界面会提示重新获取完整链接；其他情况会提示检查有效期、Referer 和 Cookie。收到这类 HTTP 错误的分片只请求一次。单个网络请求在 30 秒无响应后中断。
 
 ## 命令行
 

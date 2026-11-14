@@ -67,6 +67,55 @@ test('HTTP errors retain status and are not parsed as playlists', async t => {
   assert.equal(attempts, 1);
 });
 
+test('signed HTTP errors identify expiry without exposing the query', async t => {
+  const requests = [];
+  const origin = await serve(t, (req, res) => { requests.push(req.url); res.writeHead(403).end(); });
+  const now = Math.floor(Date.now() / 1000);
+  for (const [query, expired] of [
+    [`token=fixture-secret&expires=${now - 60}`, true],
+    [`t=fixture-secret&e=${now - 60}`, true],
+    [`token=fixture-secret&expires=${now + 60}`, false],
+    [`expires=${now - 60}`, false],
+  ]) {
+    await assert.rejects(getRetry(`${origin}/index.m3u8?${query}`), error => {
+      assert.equal(error.status, 403);
+      assert.equal(error.expired, expired);
+      assert.match(error.message, expired ? /链接签名已过期/ : /请检查链接有效期/);
+      assert.ok(!error.message.includes('?'));
+      assert.ok(!error.message.includes('fixture-secret'));
+      return true;
+    });
+    assert.equal(requests.at(-1), `/index.m3u8?${query}`);
+  }
+  assert.equal(requests.length, 4);
+});
+
+test('an expired signed fragment is requested once and leaves successful fragments cached', async t => {
+  const dir = await temporary(t);
+  const expires = Math.floor(Date.now() / 1000) - 60;
+  const query = `token=fixture-secret&expires=${expires}`;
+  let deniedRequests = 0;
+  const origin = await serve(t, (req, res) => {
+    if (req.url === '/index.m3u8') {
+      res.end(`#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nok.ts\n#EXTINF:1,\ndenied.ts?${query}\n#EXT-X-ENDLIST\n`);
+    } else if (req.url === '/ok.ts') {
+      res.end('saved fragment');
+    } else {
+      deniedRequests++;
+      res.writeHead(403).end();
+    }
+  });
+  const result = await m3u8Download(origin + '/index.m3u8', {
+    filename: 'expired', saveDir: dir, cacheDir: path.join(dir, 'cache'), threadNum: 1,
+  });
+  assert.equal(deniedRequests, 1);
+  assert.equal(result.stats.tsSuccess, 1);
+  assert.equal(result.stats.tsFailed, 1);
+  assert.match(result.errmsg, /HTTP 403.*链接签名已过期/);
+  assert.doesNotMatch(result.errmsg, /可继续下载重试|fixture-secret/);
+  assert.equal(await fs.readFile(result.m3u8Info.data[0].tsOut, 'utf8'), 'saved fragment');
+});
+
 test('cross-origin redirects strip cookies and authorization', async t => {
   let captured;
   const target = await serve(t, (req, res) => { captured = req.headers; res.end('ok'); });

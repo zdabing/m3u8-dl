@@ -13,6 +13,7 @@ import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.
 import type { M3u8DLOptions } from '../types/m3u8.js';
 import { VideoParser } from '../video-parser/index.js';
 import { sourceUrl } from '../video-parser/platform.js';
+import { browserCaptureConfig, runBrowserCapture, validateBrowserSource } from './browser-capture.js';
 import { catCatchTasks } from './cat-catch.js';
 
 interface DLServerOptions {
@@ -33,6 +34,7 @@ export class DLServer {
   wss: WebSocketServer;
   ready: Promise<void>;
   private token: string;
+  private browserCapture: ReturnType<typeof browserCaptureConfig>;
   private cacheDir: string;
   private configPath: string;
   private tasks = new Map<string, TaskItem>();
@@ -43,6 +45,7 @@ export class DLServer {
   private version = '1.10.0';
   private closing = false;
   private extractions = new Set<AbortController>();
+  private browserSubmissions = new Set<string>();
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -59,6 +62,7 @@ export class DLServer {
     this.cacheDir = resolve(options.cacheDir || process.env.DS_CACHE_DIR || resolve(homedir(), '.m3u8-dl/cache'));
     this.configPath = options.configPath || resolve(this.cacheDir, 'config.json');
     this.token = options.token || process.env.DS_SECRET || process.env.DS_TOKEN || '';
+    this.browserCapture = this.token.trim() ? browserCaptureConfig() : undefined;
     this.server = createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
     this.ready = this.init(options.port ?? (Number(process.env.DS_PORT) || 6600));
@@ -115,7 +119,7 @@ export class DLServer {
         ws.close(1008, 'Unauthorized');
         return;
       }
-      ws.send(JSON.stringify({ type: 'serverInfo', data: { version: this.version } }));
+      ws.send(JSON.stringify({ type: 'serverInfo', data: { version: this.version, browserWindow: this.browserCapture?.viewer } }));
       ws.send(JSON.stringify({ type: 'tasks', data: Object.fromEntries(this.tasks) }));
     });
     await new Promise<void>((resolveReady, reject) => {
@@ -156,10 +160,11 @@ export class DLServer {
       });
     return this.writeQueue;
   }
-  private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}) {
+  private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}, browserCapture = false) {
     const url = sourceUrl(input);
     const existing = this.tasks.get(url);
     if (this.runs.has(url) || existing?.status === 'done') return false;
+    if (existing && !!existing.browserCapture !== browserCapture) return false;
     const merged = { ...existing?.options, ...options } as M3u8DLOptions;
     const formatted = await formatOptions(url, { ...this.cfg, ...merged });
     if (!existing) {
@@ -176,6 +181,7 @@ export class DLServer {
     const item: TaskItem = {
       ...existing,
       url,
+      browserCapture: browserCapture || undefined,
       status: 'pending',
       phase: 'queued',
       errmsg: '',
@@ -197,6 +203,7 @@ export class DLServer {
     for (const item of this.tasks.values()) {
       if (this.runs.size >= this.cfg.maxDownloads) break;
       if (item.status !== 'pending' || this.runs.has(item.url)) continue;
+      if (item.browserCapture && [...this.runs.keys()].some(url => this.tasks.get(url)?.browserCapture)) continue;
       item.status = 'resume';
       const controller = new AbortController();
       // Reserve the slot before run() can emit its first progress update.
@@ -213,25 +220,30 @@ export class DLServer {
   private async run(item: TaskItem, controller: AbortController) {
     try {
       const options = item.options as M3u8DLOptions;
-      const headers = {
-        ...(item.options?.useDefaultHeaders === false ? {} : formatHeaders(this.cfg.headers)),
-        ...formatHeaders(options?.headers),
+      const report = (stats: Partial<TaskItem>) => {
+        if (this.tasks.get(item.url) !== item || controller.signal.aborted) return false;
+        Object.assign(item, stats);
+        this.broadcast();
+        this.persist();
+        return true;
       };
-      const result = await downloadResource(item.url, {
+      const runOptions: M3u8DLOptions = {
         ...this.cfg,
         ...options,
-        headers,
         cacheDir: this.cacheDir,
         convert: true,
         signal: controller.signal,
-        onProgress: (_finished, _total, _current, stats) => {
-          if (!this.tasks.has(item.url) || controller.signal.aborted) return false;
-          Object.assign(item, stats);
-          this.broadcast();
-          this.persist();
-          return true;
-        },
-      });
+        onProgress: (_finished, _total, _current, stats) => report(stats),
+      };
+      const result = item.browserCapture
+        ? await runBrowserCapture(this.browserCapture, item.url, item.cacheDir, runOptions, report)
+        : await downloadResource(item.url, {
+            ...runOptions,
+            headers: {
+              ...(item.options?.useDefaultHeaders === false ? {} : formatHeaders(this.cfg.headers)),
+              ...formatHeaders(options?.headers),
+            },
+          });
       if (!this.tasks.has(item.url)) return;
       if (result.paused || controller.signal.aborted) item.status = 'pause';
       else if (result.errmsg) {
@@ -261,6 +273,19 @@ export class DLServer {
   }
   private routes() {
     const app = this.app;
+    app.post('/api/browser-capture', async (req, res) => {
+      if (this.closing) throw new Error('服务正在关闭');
+      const url = validateBrowserSource(this.browserCapture, req.body?.url);
+      const filename = typeof req.body.filename === 'string' ? req.body.filename.trim().slice(0, 150) : '';
+      if (this.browserSubmissions.has(url)) throw new Error('该页面正在创建保存任务');
+      this.browserSubmissions.add(url);
+      try {
+        if (!(await this.enqueue(url, { type: 'm3u8', filename }, true))) throw new Error('该页面已有正在运行或已完成的任务');
+        res.json({ code: 0, message: '浏览器保存任务已加入队列' });
+      } finally {
+        this.browserSubmissions.delete(url);
+      }
+    });
     app.get('/api/platforms', (_req, res) => res.json({ code: 0, data: VideoParser.getSupportedPlatforms() }));
     app.post(['/api/extract', '/api/getM3u8Urls', '/api/parse'], async (req, res) => {
       if (this.closing) throw new Error('服务正在关闭');
@@ -353,7 +378,7 @@ export class DLServer {
       let count = 0;
       for (const url of urls) {
         const item = this.tasks.get(url);
-        if (item?.status !== 'error' || this.runs.has(url)) continue;
+        if (item?.status !== 'error' || item.browserCapture || this.runs.has(url)) continue;
         const content = await fs.readFile(resolve(this.cacheDir, md5(url), 'segments.json'), 'utf8').catch(() => '');
         if (!content) {
           if (req.body.all) continue;
@@ -424,7 +449,7 @@ export class DLServer {
       const urls: string[] = req.body.all ? [...this.tasks.keys()] : req.body.urls || [];
       for (const url of urls) {
         const item = this.tasks.get(url);
-        if (item && ['pause', 'error'].includes(item.status)) await this.enqueue(url, item.options as M3u8DLOptions);
+        if (item && ['pause', 'error'].includes(item.status)) await this.enqueue(url, item.options as M3u8DLOptions, item.browserCapture);
       }
       res.json({ code: 0, message: '已继续下载' });
     });
