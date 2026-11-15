@@ -5,7 +5,7 @@ import { chromium } from 'playwright-core';
 import { captureBrowserHls } from '../lib/browser-capture.js';
 import { m3u8Convert } from '../lib/m3u8-convert.js';
 import { normalizeDownloadUrl } from '../lib/utils.js';
-import type { DownloadStats } from '../types/contract.js';
+import type { TaskItem } from '../types/contract.js';
 import type { M3u8DLOptions } from '../types/m3u8.js';
 
 export function browserCaptureConfig(env = process.env) {
@@ -27,16 +27,27 @@ export function validateBrowserSource(config: ReturnType<typeof browserCaptureCo
 
 export async function runBrowserCapture(
   config: ReturnType<typeof browserCaptureConfig>,
-  url: string,
+  url: string | undefined,
   cacheDir: string,
   options: M3u8DLOptions,
-  progress: (stats: Partial<DownloadStats>) => void
+  progress: (stats: Partial<TaskItem>) => void
 ) {
-  validateBrowserSource(config, url);
+  if (!config) throw new Error('未启用浏览器保存');
+  if (url) validateBrowserSource(config, url);
   const signal = options.signal;
   signal?.throwIfAborted();
   const attempt = resolve(cacheDir, randomUUID());
-  progress({ phase: 'parsing', startTime: Date.now(), endTime: 0, progress: 0, tsCount: 0, tsSuccess: 0, tsFailed: 0, downloadedSize: 0 });
+  progress({
+    phase: 'parsing',
+    browserSource: undefined,
+    startTime: Date.now(),
+    endTime: 0,
+    progress: 0,
+    tsCount: 0,
+    tsSuccess: 0,
+    tsFailed: 0,
+    downloadedSize: 0,
+  });
   const browser = await chromium.connect(config.endpoint, { timeout: 12_000 }).catch(() => {
     throw new Error('无法连接独立浏览器服务');
   });
@@ -48,6 +59,12 @@ export async function runBrowserCapture(
     );
     await context.routeWebSocket(/.*/, socket => socket.close());
     const page = await context.newPage();
+    const trackNavigation = (frame: ReturnType<typeof page.mainFrame>) => {
+      if (frame !== page.mainFrame()) return;
+      const source = new URL(frame.url());
+      if (config.origins.has(source.origin)) progress({ browserSource: source.origin + source.pathname });
+    };
+    page.on('framenavigated', trackNavigation);
     const stop = new AbortController();
     const timeout = setTimeout(() => stop.abort(new Error('浏览器保存超时，已收到的分片仍在缓存目录')), 12 * 60 * 60 * 1000);
     const captureSignal = signal ? AbortSignal.any([stop.signal, signal]) : stop.signal;
@@ -64,10 +81,11 @@ export async function runBrowserCapture(
     page.on('close', closePage);
     try {
       const [, files] = await Promise.all([
-        page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {
-          captureSignal.throwIfAborted();
-          throw new Error('独立浏览器无法打开播放页');
-        }),
+        url &&
+          page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {
+            captureSignal.throwIfAborted();
+            throw new Error('独立浏览器无法打开播放页');
+          }),
         segments,
       ]);
       progress({ phase: 'merging' });
@@ -86,6 +104,7 @@ export async function runBrowserCapture(
       clearTimeout(timeout);
       stop.abort();
       page.off('close', closePage);
+      page.off('framenavigated', trackNavigation);
       await context.close().catch(() => {});
       await segments.catch(() => {});
     }

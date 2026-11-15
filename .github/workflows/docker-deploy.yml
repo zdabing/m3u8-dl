@@ -196,7 +196,9 @@ jobs:
             if curl -fsS http://127.0.0.1:16600/healthcheck && \
               curl -fsS -o /dev/null http://127.0.0.1:16080/vnc.html && \
               docker exec m3u8-dl-smoke node -e 'const s=require("node:net").connect(9323,"127.0.0.1"); s.on("connect",()=>s.end()); s.on("error",()=>process.exit(1));'; then
-              exit 0
+              curl -fsS -H 'Authorization: smoke-test' -H 'Content-Type: application/json' \
+                -d '{}' http://127.0.0.1:16600/api/browser/open | jq -e '.code == 0 and (.data.url | startswith("browser:"))'
+              exit $?
             fi
             sleep 2
           done

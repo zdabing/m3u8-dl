@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { chromium } = require('playwright-core');
+const WebSocket = require('ws');
 const { DLServer } = require('../cjs/server/download-server.js');
 
 test('remote browser capture merges standard HLS responses and leaves incomplete sessions unpublished', {
@@ -23,7 +24,11 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
     await new Promise(done => source ? source.close(done) : done());
     await fs.rm(dir, { recursive: true, force: true });
   });
-  browser = await chromium.launchServer({ executablePath: process.env.TEST_BROWSER_PATH, host: '127.0.0.1' });
+  browser = await chromium.launchServer({
+    executablePath: process.env.TEST_BROWSER_PATH, host: '127.0.0.1', args: ['--remote-debugging-port=0'],
+  });
+  const profile = browser.process().spawnargs.find(arg => arg.startsWith('--user-data-dir=')).split('=')[1];
+  const debugPort = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
   execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=25', '-t', '3', '-c:v', 'libx264',
     '-g', '25', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '0', 'index.m3u8'], { cwd: dir, windowsHide: true });
   const manifest = await fs.readFile(path.join(dir, 'index.m3u8'), 'utf8');
@@ -38,6 +43,7 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
       res.end(hlsScript);
       return;
     }
+    if (url.pathname === '/viewer') { res.end('Browser viewer fixture'); return; }
     if (url.pathname === '/watch') {
       res.setHeader('content-type', 'text/html');
       if (mode === 'stalled') {
@@ -80,7 +86,7 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
   });
   await new Promise(done => source.listen(0, '127.0.0.1', done));
   const origin = `http://127.0.0.1:${source.address().port}`;
-  const settings = { DS_BROWSER_ENDPOINT: browser.wsEndpoint(), DS_BROWSER_WINDOW: 'https://viewer.example/vnc.html', DS_BROWSER_ORIGINS: origin };
+  const settings = { DS_BROWSER_ENDPOINT: browser.wsEndpoint(), DS_BROWSER_WINDOW: origin + '/viewer', DS_BROWSER_ORIGINS: origin };
   for (const [key, value] of Object.entries(settings)) {
     const previous = process.env[key];
     process.env[key] = value;
@@ -137,16 +143,47 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
       const page = await client.newPage({ viewport: { width, height: 820 } });
       await page.addInitScript(() => sessionStorage.setItem('m3u8-token', 'test-browser-capture'));
       await page.goto(appUrl);
-      await page.getByRole('button', { name: '打开浏览器保存' }).click({ timeout: 5000 });
-      const dialog = page.getByRole('dialog', { name: '浏览器保存' });
-      await dialog.getByLabel('播放页地址').fill(origin + '/watch?case=incomplete');
-      assert.ok(await dialog.getByRole('button', { name: '创建保存任务' }).isVisible());
-      const externalWindow = dialog.getByRole('link', { name: '打开浏览器窗口' });
-      assert.equal(await externalWindow.getAttribute('target'), '_blank');
-      const box = await dialog.boundingBox();
+      await page.getByText('服务已连接').waitFor({ timeout: 5000 });
+      const entry = page.getByRole('button', { name: '打开浏览器' });
+      const box = await entry.boundingBox();
       assert.ok(box.x >= 0 && box.x + box.width <= width);
+      const opened = page.waitForEvent('popup', { timeout: 5000 });
+      await entry.click();
+      const popup = await opened;
+      await popup.waitForURL(origin + '/viewer');
+      assert.equal(await page.locator('dialog[open]').count(), 0);
+      await popup.close();
       await page.close();
     }
+    const captures = Object.values((await call('tasks')).data).filter(task => task.url.startsWith('browser:'));
+    assert.equal(captures.length, 1);
+    const capture = captures[0];
+    assert.equal(capture.browserSource, undefined);
+
+    const devtools = `http://127.0.0.1:${debugPort}/json/list`;
+    let target;
+    for (let attempt = 0; attempt < 50 && !target; attempt++) {
+      const tabs = await (await fetch(devtools)).json();
+      target = tabs.find(tab => tab.type === 'page' && tab.url === 'about:blank');
+      if (!target) await new Promise(done => setTimeout(done, 50));
+    }
+    assert.ok(target, 'Browser capture opens a blank Chromium tab');
+    const socket = new WebSocket(target.webSocketDebuggerUrl);
+    try {
+      await new Promise((resolve, reject) => {
+        socket.once('error', reject);
+        socket.once('open', () => socket.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url } })));
+        socket.once('message', value => {
+          const reply = JSON.parse(value);
+          if (reply.error || reply.result?.errorText) reject(new Error(JSON.stringify(reply)));
+          else resolve();
+        });
+      });
+      const saved = await until(capture.url, task => ['done', 'error'].includes(task.status));
+      assert.equal(saved.status, 'done', saved.errmsg);
+      assert.equal(saved.browserSource, origin + '/watch');
+      assert.equal(saved.tsSuccess, segments.length);
+    } finally { socket.close(); }
   } finally {
     await client.close();
   }

@@ -268,6 +268,7 @@ button:active:not(:disabled), .button:active:not(:disabled) { transform: transla
 @media (max-width: 540px) {
  .app-header { min-height: 68px; padding: 0 16px; gap: 10px; } .brand { font-size: 18px; gap: 8px; } .brand strong span { font-size: 14px; } .brand-mark { width: 32px; height: 36px; border-radius: 8px; } .brand-mark svg { width: 24px; }
  .header-actions { gap: 6px; } .settings-button span, .extract-button span { display: none; } .settings-button, .extract-button { width: 40px; height: 42px; padding: 0; } .new-button { font-size: 12px; padding-inline: 10px; min-height: 42px; }
+ .browser-button { min-height: 42px; padding-inline: 8px; gap: 4px; font-size: 12px; }
  .workspace { padding: 24px 16px 16px; } .workspace-heading { align-items: flex-start; gap: 8px; margin-bottom: 16px; } .workspace-heading h1 { font-size: 23px; } .workspace-heading p { font-size: 11px; max-width: 180px; line-height: 1.7; }
  .workspace-status { gap: 9px; padding-top: 4px; } .connection { font-size: 10px; } .heading-speed strong { font-size: 14px; } .heading-speed { gap: 5px; }
  .tabs { width: 100%; gap: 25px; } .tabs button { font-size: 13px; padding-bottom: 12px; } .tabs button span { min-width: 21px; font-size: 10px; }

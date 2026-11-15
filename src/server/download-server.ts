@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir } from 'node:os';
@@ -24,6 +25,7 @@ interface DLServerOptions {
   token?: string;
 }
 interface Run {
+  browserCapture?: boolean;
   controller: AbortController;
   completion: Promise<void>;
 }
@@ -46,6 +48,7 @@ export class DLServer {
   private closing = false;
   private extractions = new Set<AbortController>();
   private browserSubmissions = new Set<string>();
+  private openingBrowser?: Promise<string>;
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -161,7 +164,7 @@ export class DLServer {
     return this.writeQueue;
   }
   private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}, browserCapture = false) {
-    const url = sourceUrl(input);
+    const url = browserCapture && input.startsWith('browser:') ? input : sourceUrl(input);
     const existing = this.tasks.get(url);
     if (this.runs.has(url) || existing?.status === 'done') return false;
     if (existing && !!existing.browserCapture !== browserCapture) return false;
@@ -200,14 +203,22 @@ export class DLServer {
   }
   private startNext() {
     if (this.closing) return;
+    const active = [...this.runs.values()];
+    let browserRunning = active.some(run => run.browserCapture);
+    let downloadsRunning = active.filter(run => !run.browserCapture).length;
     for (const item of this.tasks.values()) {
-      if (this.runs.size >= this.cfg.maxDownloads) break;
       if (item.status !== 'pending' || this.runs.has(item.url)) continue;
-      if (item.browserCapture && [...this.runs.keys()].some(url => this.tasks.get(url)?.browserCapture)) continue;
+      if (item.browserCapture) {
+        if (browserRunning) continue;
+        browserRunning = true;
+      } else {
+        if (downloadsRunning >= this.cfg.maxDownloads) continue;
+        downloadsRunning++;
+      }
       item.status = 'resume';
       const controller = new AbortController();
       // Reserve the slot before run() can emit its first progress update.
-      const run: Run = { controller, completion: Promise.resolve() };
+      const run: Run = { browserCapture: item.browserCapture, controller, completion: Promise.resolve() };
       this.runs.set(item.url, run);
       run.completion = this.run(item, controller).finally(() => {
         this.runs.delete(item.url);
@@ -236,7 +247,13 @@ export class DLServer {
         onProgress: (_finished, _total, _current, stats) => report(stats),
       };
       const result = item.browserCapture
-        ? await runBrowserCapture(this.browserCapture, item.url, item.cacheDir, runOptions, report)
+        ? await runBrowserCapture(
+            this.browserCapture,
+            item.url.startsWith('browser:') ? undefined : item.url,
+            item.cacheDir,
+            runOptions,
+            report
+          )
         : await downloadResource(item.url, {
             ...runOptions,
             headers: {
@@ -273,6 +290,21 @@ export class DLServer {
   }
   private routes() {
     const app = this.app;
+    app.post('/api/browser/open', async (_req, res) => {
+      if (!this.browserCapture) throw new Error('未启用浏览器保存');
+      if (this.closing) throw new Error('服务正在关闭');
+      this.openingBrowser ??= (async () => {
+        for (const item of this.tasks.values()) {
+          if (item.browserCapture && ['pending', 'resume'].includes(item.status)) return item.url;
+        }
+        const url = `browser:${randomUUID()}`;
+        await this.enqueue(url, { type: 'm3u8', filename: '浏览器保存' }, true);
+        return url;
+      })().finally(() => {
+        this.openingBrowser = undefined;
+      });
+      res.json({ code: 0, data: { url: await this.openingBrowser } });
+    });
     app.post('/api/browser-capture', async (req, res) => {
       if (this.closing) throw new Error('服务正在关闭');
       const url = validateBrowserSource(this.browserCapture, req.body?.url);

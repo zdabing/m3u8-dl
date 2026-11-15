@@ -50,6 +50,7 @@ export interface TaskItem extends DownloadStats {
   url: string;
   status: TaskStatus;
   browserCapture?: boolean;
+  browserSource?: string;
   cacheDir?: string;
   options?: TaskOptions;
   dlOptions?: TaskOptions;

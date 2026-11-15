@@ -35,12 +35,7 @@ const advanced = ref(false);
 const settingsOpen = ref(false);
 const newDownloadOpen = ref(false);
 const browserWindow = ref('');
-const browserDialog = ref<HTMLDialogElement>();
-const browserUrl = ref('');
-const browserFilename = ref('');
-const browserError = ref('');
 const browserBusy = ref(false);
-const browserQueued = ref(false);
 const detailsUrl = ref('');
 const detailsTask = computed(() => tasks.value[detailsUrl.value]);
 const segments = ref<SegmentSnapshot>({ fingerprint: '', items: [] });
@@ -83,7 +78,7 @@ const errors = computed(() => active.value.filter(task => task.status === 'error
 const running = computed(() => active.value.filter(task => task.status === 'resume').length);
 const speed = computed(() => active.value.reduce((sum, task) => sum + (task.status === 'resume' ? task.speed || 0 : 0), 0));
 const visible = computed(() => (tab.value === 'done' ? complete.value : tab.value === 'error' ? active.value.filter(task => task.status === 'error') : active.value)
-  .filter(task => `${name(task)} ${task.url}`.toLowerCase().includes(search.value.toLowerCase()))
+  .filter(task => `${name(task)} ${task.browserSource || task.url}`.toLowerCase().includes(search.value.toLowerCase()))
   .sort((a, b) => (b.startTime || 0) - (a.startTime || 0)));
 const selectedTasks = computed(() => visible.value.filter(task => selected.has(task.url)));
 const allSelected = computed(() => visible.value.length > 0 && selectedTasks.value.length === visible.value.length);
@@ -101,6 +96,7 @@ function bytes(value = 0) {
   return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${['B', 'KB', 'MB', 'GB'][index]}`;
 }
 function host(url: string) { try { return new URL(url).hostname; } catch { return url; } }
+function taskSource(task: TaskItem) { return task.url.startsWith('browser:') ? host(task.browserSource || '浏览器窗口') : host(task.url); }
 function isFile(task: TaskItem) { return task.downloadType ? task.downloadType === 'file' : task.options?.type === 'file'; }
 function kind(task: TaskItem) { return isFile(task) ? /\.([a-z0-9]{1,5})$/i.exec(task.filename || '')?.[1].toUpperCase() || 'FILE' : 'HLS'; }
 function detailLabel(task: TaskItem) { return `查看 ${name(task)} 的${isFile(task) ? '下载' : '分片'}详情`; }
@@ -335,19 +331,22 @@ async function details(task: TaskItem) {
 }
 function filterSegments(filter: 'all' | 'done' | 'error' | 'pending') { segmentFilter.value = filter; segmentPage.value = 1; }
 function fileUrl(task: TaskItem) { return `/api/file?url=${encodeURIComponent(task.url)}&token=${encodeURIComponent(token.value)}`; }
-function openBrowserDialog() {
-  browserError.value = '';
-  browserQueued.value = false;
-  browserDialog.value?.showModal();
-}
-async function startBrowserCapture() {
+async function openBrowserWindow() {
+  if (connection.value !== 'online') { notify('连接下载器后可打开浏览器', true); return; }
+  const viewer = browserWindow.value;
+  if (!viewer) { notify('此容器未启用浏览器保存，请检查 Docker 的浏览器配置', true); return; }
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) { notify('浏览器拦截了新窗口，请允许本站打开新窗口', true); return; }
+  popup.opener = null;
   browserBusy.value = true;
-  browserError.value = '';
   try {
-    await api('browser-capture', { url: browserUrl.value.trim(), filename: browserFilename.value.trim() });
-    browserQueued.value = true;
+    await api('browser/open', {});
+    popup.location.replace(viewer);
     tab.value = 'active';
-  } catch (error) { browserError.value = (error as Error).message; }
+  } catch (error) {
+    popup.close();
+    notify((error as Error).message, true);
+  }
   finally { browserBusy.value = false; }
 }
 function onVisible() { if (!document.hidden) { void load(); if (connection.value !== 'online') connect(); } }
@@ -358,7 +357,7 @@ onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmen
 <template>
   <div class="app-shell">
     <a class="skip-link" href="#main-content">跳到下载任务</a>
-    <header class="app-header"><a class="brand" href="/" aria-label="M3U8 下载器首页"><span class="brand-mark"><AppIcon name="bolt" :size="28" /></span><strong>M3U8 <span>DL</span></strong></a><div class="header-actions"><button v-if="browserWindow" type="button" class="button secondary extract-button" aria-label="打开浏览器保存" @click="openBrowserDialog"><AppIcon name="browser" :size="17" /><span>浏览器保存</span></button><button type="button" class="button secondary extract-button" aria-label="打开网页提取" @click="newDownload('extract')"><AppIcon name="link" :size="17" /><span>网页提取</span></button><button type="button" class="button primary new-button" @click="newDownload('download')"><AppIcon name="plus" :size="17" />新建下载</button><button type="button" class="button secondary settings-button" aria-label="打开下载设置" @click="settings"><AppIcon name="settings" :size="17" /><span>设置</span></button></div></header>
+    <header class="app-header"><a class="brand" href="/" aria-label="M3U8 下载器首页"><span class="brand-mark"><AppIcon name="bolt" :size="28" /></span><strong>M3U8 <span>DL</span></strong></a><div class="header-actions"><button type="button" class="button secondary browser-button" aria-label="打开浏览器" :disabled="browserBusy" @click="openBrowserWindow"><AppIcon name="browser" :size="17" /><span>浏览器</span></button><button type="button" class="button secondary extract-button" aria-label="打开网页提取" @click="newDownload('extract')"><AppIcon name="link" :size="17" /><span>网页提取</span></button><button type="button" class="button primary new-button" @click="newDownload('download')"><AppIcon name="plus" :size="17" />新建下载</button><button type="button" class="button secondary settings-button" aria-label="打开下载设置" @click="settings"><AppIcon name="settings" :size="17" /><span>设置</span></button></div></header>
     <main id="main-content" class="workspace" tabindex="-1">
       <div class="workspace-heading"><div><h1>下载任务</h1><p>视频、字幕与网页媒体，集中管理。</p></div><div class="workspace-status"><div class="connection" :class="connection" role="status"><i />{{ connection === 'online' ? '服务已连接' : connection === 'connecting' ? '正在连接' : '服务未连接' }}</div><span class="heading-speed"><AppIcon name="arrow" :size="15" /><strong>{{ bytes(speed) }}<small>/s</small></strong><span>{{ running }} 个运行中</span></span></div></div>
       <div v-if="connection === 'offline'" class="offline-banner" role="status"><AppIcon name="info" :size="16" />服务连接已断开，正在自动重连。<button type="button" @click="connect(); load()">重新连接</button></div>
@@ -382,7 +381,7 @@ onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmen
           <tr v-if="loading" class="empty-row"><td colspan="5"><div class="loading-state" role="status"><div v-for="n in 3" :key="n" class="skeleton-row"><span /><span /><span /></div><p>正在同步下载任务…</p></div></td></tr>
           <tr v-else-if="!visible.length" class="empty-row"><td colspan="5"><div class="empty-state"><AppIcon :name="search ? 'search' : 'arrow'" :size="36" /><h2>{{ search ? '没有找到相关任务' : tab === 'done' ? '暂无已完成的下载' : tab === 'error' ? '没有失败的任务' : '暂无下载任务' }}</h2><p>{{ search ? '试试其他文件名或链接' : tab === 'done' ? '下载完成的文件会显示在这里' : tab === 'error' ? '下载失败时，可在这里仅重试失败的分片' : '添加 M3U8、视频或字幕直链，开始下载' }}</p><button v-if="!search && tab === 'active'" type="button" class="button primary" @click="newDownload('download')"><AppIcon name="plus" :size="16" />新建下载</button><button v-else-if="search" type="button" class="text-button" @click="search = ''">清除搜索</button></div></td></tr>
           <tr v-for="task in visible" :key="task.url" class="task-row" :class="{ completed: task.status === 'done', failed: task.status === 'error', 'row-selected': selected.has(task.url) }">
-            <td class="file-cell"><div class="file-layout"><label class="task-checkbox"><input type="checkbox" :checked="selected.has(task.url)" :disabled="batchBusy || pending.has(task.url)" :aria-label="`选择 ${name(task)}`" @change="toggleTask(task.url)" /><span class="sr-only">选择 {{ name(task) }}</span></label><span class="hls-tag">{{ kind(task) }}</span><div class="file-description"><button type="button" class="file-name" :title="name(task)" @click="details(task)">{{ name(task) }}</button><span class="file-source">{{ host(task.url) }}</span></div></div></td>
+            <td class="file-cell"><div class="file-layout"><label class="task-checkbox"><input type="checkbox" :checked="selected.has(task.url)" :disabled="batchBusy || pending.has(task.url)" :aria-label="`选择 ${name(task)}`" @change="toggleTask(task.url)" /><span class="sr-only">选择 {{ name(task) }}</span></label><span class="hls-tag">{{ kind(task) }}</span><div class="file-description"><button type="button" class="file-name" :title="name(task)" @click="details(task)">{{ name(task) }}</button><span class="file-source">{{ taskSource(task) }}</span></div></div></td>
             <td class="progress-cell"><div class="progress-line"><div class="progress-track" role="progressbar" :aria-label="`${name(task)} ${label(task)}`" :aria-valuenow="progress(task)" aria-valuemin="0" aria-valuemax="100"><div :style="{ width: `${progress(task)}%` }" /></div><span>{{ progress(task) }}%</span></div><div v-if="isFile(task)" class="fragment-link"><AppIcon name="file" :size="13" /><span>{{ bytes(task.downloadedSize) }} / {{ task.size ? bytes(task.size) : '总大小未知' }}</span></div><button v-else type="button" class="fragment-link" :aria-label="detailLabel(task)" @click="details(task)"><AppIcon name="info" :size="13" /><span>{{ task.tsSuccess || 0 }}/{{ task.tsCount || '—' }} 分片</span><b v-if="task.tsFailed" class="failure-number">{{ task.tsFailed }} 失败</b><span class="progress-size">| {{ bytes(task.downloadedSize) }}</span></button></td>
             <td class="speed-cell" data-label="速度"><strong>{{ task.status === 'resume' && task.phase === 'downloading' ? task.speedDesc || '0 B/s' : '—' }}</strong><small v-if="task.status === 'resume' && task.phase === 'downloading'">剩余 {{ eta(task.remainingTime) }}</small></td>
             <td class="status-cell" data-label="状态"><span class="status" :class="[task.status, { merging: task.phase === 'merging' && task.status === 'resume' }]"><span v-if="task.status === 'resume' && task.phase === 'merging'" class="spinner mini" />{{ label(task) }}</span><small v-if="task.startTime">{{ new Date(task.endTime || task.startTime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) }}</small><p v-if="task.status === 'error' && task.errmsg" class="task-error" :title="task.errmsg">{{ task.errmsg }}</p><small v-if="task.phase === 'merging' && task.status === 'resume'">{{ task.mergeMessage || '等待合并' }}</small></td>
@@ -429,30 +428,6 @@ onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmen
         </div>
         <div v-if="detailsUrl" class="dialog-footer detail-footer"><span v-if="detailsTask && !isFile(detailsTask) && !detailsTask.browserCapture" class="detail-live"><i />每秒自动更新</span><button v-if="detailsTask?.status === 'error' && segmentCounts.error" type="button" class="button primary" :disabled="pending.has(detailsTask.url)" @click="action(detailsTask, 'retry-failed')"><AppIcon name="retry" :size="16" />仅重试失败分片 ({{ segmentCounts.error }})</button><button type="button" class="button secondary" @click="closeModal">关闭</button></div>
         <div v-else class="dialog-footer"><button v-if="!loginOpen" type="button" class="button secondary" :disabled="modalBusy" @click="closeModal">取消</button><button type="submit" class="button" :class="removeTasks.length ? 'danger' : 'primary'" :disabled="modalBusy || extractBusy || (newDownloadOpen && (connection !== 'online' || (entryMode === 'extract' && !selectedExtracted.length)))"><span v-if="modalBusy" class="spinner" />{{ modalBusy ? '请稍候…' : loginOpen ? '连接服务' : newDownloadOpen ? entryMode === 'extract' ? `下载所选 (${selectedExtracted.length})` : lines.length > 1 ? `添加 ${lines.length} 个下载` : '开始下载' : settingsOpen ? '保存设置' : editTask ? '保存并继续' : '确认移除' }}</button></div>
-      </form>
-    </dialog>
-    <dialog ref="browserDialog" class="dialog" aria-labelledby="browser-dialog-title">
-      <form @submit.prevent="startBrowserCapture">
-        <div class="dialog-header">
-          <div class="dialog-heading"><span class="dialog-symbol"><AppIcon name="browser" :size="22" /></span><div><h2 id="browser-dialog-title">浏览器保存</h2><p>在服务器浏览器里播放，并保存完整的 HLS 点播。</p></div></div>
-          <button type="button" class="icon-button" aria-label="关闭浏览器保存" @click="browserDialog?.close()"><AppIcon name="close" /></button>
-        </div>
-        <div class="dialog-body">
-          <p v-if="browserQueued" class="dialog-intro" role="status">任务已加入队列。打开浏览器窗口，等播放页出现后从头播放。在下载列表查看分片进度。</p>
-          <template v-else>
-            <label for="capture-url">播放页地址</label>
-            <input id="capture-url" v-model="browserUrl" type="url" required maxlength="2048" placeholder="https://example.com/watch" spellcheck="false" />
-            <label for="capture-filename">文件名称 <span class="field-note">可选</span></label>
-            <input id="capture-filename" v-model="browserFilename" maxlength="150" placeholder="不填则自动生成" />
-            <p class="field-help">支持未加密的 MPEG-TS 点播。</p>
-          </template>
-          <p v-if="browserError" class="form-error" role="alert">{{ browserError }}</p>
-        </div>
-        <div class="dialog-footer">
-          <button type="button" class="button secondary" @click="browserDialog?.close()">关闭</button>
-          <a v-if="browserWindow" :href="browserWindow" class="button" :class="browserQueued ? 'primary' : 'secondary'" target="_blank" rel="noopener noreferrer">打开浏览器窗口</a>
-          <button v-if="!browserQueued" type="submit" class="button primary" :disabled="browserBusy || connection !== 'online'">{{ browserBusy ? '正在提交…' : '创建保存任务' }}</button>
-        </div>
       </form>
     </dialog>
   </div>
