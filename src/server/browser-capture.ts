@@ -30,7 +30,8 @@ export async function runBrowserCapture(
   url: string | undefined,
   cacheDir: string,
   options: M3u8DLOptions,
-  progress: (stats: Partial<TaskItem>) => void
+  progress: (stats: Partial<TaskItem>) => void,
+  reserveFilename?: (name: string) => Promise<string>
 ) {
   if (!config) throw new Error('未启用浏览器保存');
   if (url) validateBrowserSource(config, url);
@@ -59,6 +60,10 @@ export async function runBrowserCapture(
     );
     await context.routeWebSocket(/.*/, socket => socket.close());
     const page = await context.newPage();
+    if (!url)
+      await page.evaluate(title => {
+        document.title = title;
+      }, options.filename || '浏览器保存');
     const trackNavigation = (frame: ReturnType<typeof page.mainFrame>) => {
       if (frame !== page.mainFrame()) return;
       const source = new URL(frame.url());
@@ -68,7 +73,9 @@ export async function runBrowserCapture(
     const stop = new AbortController();
     const timeout = setTimeout(() => stop.abort(new Error('浏览器保存超时，已收到的分片仍在缓存目录')), 12 * 60 * 60 * 1000);
     const captureSignal = signal ? AbortSignal.any([stop.signal, signal]) : stop.signal;
+    let captureTitle: Promise<string> | undefined;
     const segments = captureBrowserHls(context, config.origins, attempt, captureSignal, (total, captured, bytes) => {
+      if (reserveFilename && !captureTitle) captureTitle = page.title().catch(() => '');
       progress({
         phase: 'downloading',
         tsCount: total,
@@ -80,6 +87,7 @@ export async function runBrowserCapture(
     const closePage = () => stop.abort(new Error('浏览器播放页已关闭，已收到的分片仍在缓存目录'));
     page.on('close', closePage);
     try {
+      if (!url) await page.bringToFront();
       const [, files] = await Promise.all([
         url &&
           page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {
@@ -88,9 +96,17 @@ export async function runBrowserCapture(
           }),
         segments,
       ]);
-      progress({ phase: 'merging' });
+      const title = await captureTitle;
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: Use a filename accepted by Windows and Linux.
+      const stem = [...(title || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim()]
+        .slice(0, 56)
+        .join('')
+        .replace(/[. ]+$/, '');
+      const reserved = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/i.test(stem);
+      const filename = reserveFilename && stem ? await reserveFilename(`${reserved ? '_' : ''}${stem}.mp4`) : options.filename;
+      progress({ phase: 'merging', filename });
       const filepath = await m3u8Convert(
-        { ...options, onMergeProgress: (mergeProgress, mergeMessage) => progress({ mergeProgress, mergeMessage }) },
+        { ...options, filename, onMergeProgress: (mergeProgress, mergeMessage) => progress({ mergeProgress, mergeMessage }) },
         files
       );
       if (options.delCache) await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => {});

@@ -9,7 +9,7 @@ const { chromium } = require('playwright-core');
 const WebSocket = require('ws');
 const { DLServer } = require('../cjs/server/download-server.js');
 
-test('remote browser capture merges standard HLS responses and leaves incomplete sessions unpublished', {
+test('remote browser capture keeps concurrent HLS windows separate and leaves incomplete sessions unpublished', {
   skip: !process.env.TEST_BROWSER_PATH && 'Set TEST_BROWSER_PATH to run with a local Chromium executable',
   timeout: 35_000,
 }, async t => {
@@ -29,11 +29,16 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
   });
   const profile = browser.process().spawnargs.find(arg => arg.startsWith('--user-data-dir=')).split('=')[1];
   const debugPort = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
-  execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=25', '-t', '3', '-c:v', 'libx264',
-    '-g', '25', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '0', 'index.m3u8'], { cwd: dir, windowsHide: true });
-  const manifest = await fs.readFile(path.join(dir, 'index.m3u8'), 'utf8');
+  const manifests = new Map();
+  for (const [name, seconds] of [['index', '3'], ['alternate', '2']]) {
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=25', '-t', seconds, '-c:v', 'libx264',
+      '-g', '25', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '0', name + '.m3u8'], { cwd: dir, windowsHide: true });
+    manifests.set('/' + name + '.m3u8', await fs.readFile(path.join(dir, name + '.m3u8'), 'utf8'));
+  }
   const hlsScript = await fs.readFile(require.resolve('hls.js'));
-  const segments = manifest.split('\n').filter(line => line.endsWith('.ts'));
+  const fragments = manifest => manifest.split('\n').filter(line => line.endsWith('.ts'));
+  const segments = fragments(manifests.get('/index.m3u8'));
+  const mediaFiles = new Set([...manifests.values()].flatMap(fragments));
   const requests = [];
   source = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://fixture');
@@ -44,19 +49,19 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
       return;
     }
     if (url.pathname === '/viewer') { res.end('Browser viewer fixture'); return; }
-    if (url.pathname === '/watch') {
-      res.setHeader('content-type', 'text/html');
+    if (url.pathname === '/watch' || url.pathname === '/watch-two') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
       if (mode === 'stalled') {
         res.end("<script>fetch('/index.m3u8?case=stalled')</script>");
         return;
       }
       if (mode === 'play') {
-        res.end(`<video muted controls></video><button>Play</button><script src="/hls.js"></script><script>
+        res.end(`<title>示例 / 视频: 第一集</title><video muted controls></video><button>Play</button><script src="/hls.js"></script><script>
           document.querySelector('button').onclick = () => {
             const video = document.querySelector('video');
             const hls = new Hls({enableWorker:false});
             hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
-            hls.loadSource('/index.m3u8?case=play');
+            hls.loadSource('${url.pathname === '/watch-two' ? '/alternate.m3u8' : '/index.m3u8'}?case=play');
             hls.attachMedia(video);
           };
           document.querySelector('button').click();
@@ -70,13 +75,13 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
       })()</script>`);
       return;
     }
-    if (url.pathname === '/index.m3u8') {
+    if (manifests.has(url.pathname)) {
       res.setHeader('content-type', 'application/vnd.apple.mpegurl');
       if (mode === 'stalled') { res.write('#EXTM3U\n'); return; }
-      res.end(manifest);
+      res.end(manifests.get(url.pathname));
       return;
     }
-    if (segments.includes(url.pathname.slice(1))) {
+    if (mediaFiles.has(url.pathname.slice(1))) {
       requests.push({ segment: url.pathname.slice(1), browser: /Edg|Chrome/.test(req.headers['user-agent'] || '') });
       res.setHeader('content-type', 'video/mp2t');
       res.end(await fs.readFile(path.join(dir, url.pathname.slice(1))));
@@ -115,11 +120,12 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
   assert.equal((await call('browser-capture', { url, filename: 'browser-copy' })).code, 0);
   const done = await until(url, task => ['done', 'error'].includes(task.status));
   assert.equal(done.status, 'done', done.errmsg);
+  assert.equal(done.filename, 'browser-copy.mp4');
   assert.equal(done.tsSuccess, segments.length);
   assert.deepEqual(requests.map(item => item.segment), segments);
   assert.ok(requests.every(item => item.browser));
-  const duration = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', done.localVideo], { encoding: 'utf8' }));
-  assert.ok(duration >= 2.9 && duration < 3.2);
+  const duration = file => Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { encoding: 'utf8' }));
+  assert.ok(Math.abs(duration(done.localVideo) - 3) < 0.2);
 
   const incomplete = origin + '/watch?case=incomplete';
   assert.equal((await call('browser-capture', { url: incomplete, filename: 'incomplete' })).code, 0);
@@ -156,34 +162,46 @@ test('remote browser capture merges standard HLS responses and leaves incomplete
       await page.close();
     }
     const captures = Object.values((await call('tasks')).data).filter(task => task.url.startsWith('browser:'));
-    assert.equal(captures.length, 1);
-    const capture = captures[0];
-    assert.equal(capture.browserSource, undefined);
+    assert.equal(captures.length, 2);
+    assert.ok(captures.every(capture => capture.status === 'resume' && capture.browserSource === undefined));
+    assert.match((await call('browser/open', {})).message, /窗口已达上限/);
 
     const devtools = `http://127.0.0.1:${debugPort}/json/list`;
-    let target;
-    for (let attempt = 0; attempt < 50 && !target; attempt++) {
+    let targets = [];
+    for (let attempt = 0; attempt < 50 && targets.length < 2; attempt++) {
       const tabs = await (await fetch(devtools)).json();
-      target = tabs.find(tab => tab.type === 'page' && tab.url === 'about:blank');
-      if (!target) await new Promise(done => setTimeout(done, 50));
+      targets = tabs.filter(tab => tab.type === 'page' && tab.url === 'about:blank' && captures.some(capture => capture.filename === tab.title));
+      if (targets.length < 2) await new Promise(done => setTimeout(done, 50));
     }
-    assert.ok(target, 'Browser capture opens a blank Chromium tab');
-    const socket = new WebSocket(target.webSocketDebuggerUrl);
-    try {
-      await new Promise((resolve, reject) => {
-        socket.once('error', reject);
-        socket.once('open', () => socket.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url } })));
-        socket.once('message', value => {
-          const reply = JSON.parse(value);
-          if (reply.error || reply.result?.errorText) reject(new Error(JSON.stringify(reply)));
-          else resolve();
+    assert.equal(targets.length, 2, 'Each capture has its own blank Chromium window');
+    const originalFile = path.join(dir, '示例 _ 视频_ 第一集.mp4');
+    await fs.writeFile(originalFile, 'existing file');
+    const results = await Promise.all(captures.map(async (capture, index) => {
+      const route = index === 0 ? '/watch' : '/watch-two';
+      const target = targets.find(tab => tab.title === capture.filename);
+      const socket = new WebSocket(target.webSocketDebuggerUrl);
+      try {
+        await new Promise((resolve, reject) => {
+          socket.once('error', reject);
+          socket.once('open', () => socket.send(JSON.stringify({ id: 1, method: 'Page.navigate', params: { url: origin + route + '?case=play' } })));
+          socket.once('message', value => {
+            const reply = JSON.parse(value);
+            if (reply.error || reply.result?.errorText) reject(new Error(JSON.stringify(reply)));
+            else resolve();
+          });
         });
-      });
-      const saved = await until(capture.url, task => ['done', 'error'].includes(task.status));
-      assert.equal(saved.status, 'done', saved.errmsg);
-      assert.equal(saved.browserSource, origin + '/watch');
-      assert.equal(saved.tsSuccess, segments.length);
-    } finally { socket.close(); }
+        const saved = await until(capture.url, task => ['done', 'error'].includes(task.status));
+        const expectedSeconds = index === 0 ? 3 : 2;
+        assert.equal(saved.status, 'done', saved.errmsg);
+        assert.equal(saved.browserSource, origin + route);
+        assert.equal(saved.tsSuccess, expectedSeconds);
+        assert.ok(Math.abs(duration(saved.localVideo) - expectedSeconds) < 0.2);
+        return saved.localVideo;
+      } finally { socket.close(); }
+    }));
+    assert.equal(new Set(results).size, 2);
+    assert.deepEqual(results.map(result => path.basename(result)).sort(), ['示例 _ 视频_ 第一集 (2).mp4', '示例 _ 视频_ 第一集 (3).mp4']);
+    assert.equal(await fs.readFile(originalFile, 'utf8'), 'existing file');
   } finally {
     await client.close();
   }

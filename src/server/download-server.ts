@@ -48,7 +48,7 @@ export class DLServer {
   private closing = false;
   private extractions = new Set<AbortController>();
   private browserSubmissions = new Set<string>();
-  private openingBrowser?: Promise<string>;
+  private openingBrowser = Promise.resolve();
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -163,6 +163,23 @@ export class DLServer {
       });
     return this.writeQueue;
   }
+  private async reserveFilename(item: TaskItem, original: string, saveDir: string, signal?: AbortSignal) {
+    const ext = extname(original);
+    const stem = basename(original, ext);
+    for (let index = 1; ; index++) {
+      const filename = index === 1 ? original : `${stem} (${index})${ext}`;
+      const alternate = `${basename(filename, ext)}.ts`;
+      const exists =
+        (await checkFileExists(resolve(saveDir, filename))) ||
+        (item.browserCapture && (await checkFileExists(resolve(saveDir, alternate))));
+      signal?.throwIfAborted();
+      if (exists || [...this.tasks.values()].some(task => task !== item && task.filename === filename)) continue;
+      item.filename = filename;
+      item.options.filename = filename;
+      this.tasks.set(item.url, item);
+      return filename;
+    }
+  }
   private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}, browserCapture = false) {
     const url = browserCapture && input.startsWith('browser:') ? input : sourceUrl(input);
     const existing = this.tasks.get(url);
@@ -170,17 +187,6 @@ export class DLServer {
     if (existing && !!existing.browserCapture !== browserCapture) return false;
     const merged = { ...existing?.options, ...options } as M3u8DLOptions;
     const formatted = await formatOptions(url, { ...this.cfg, ...merged });
-    if (!existing) {
-      const original = formatted.options.filename;
-      const extension = extname(original);
-      let suffix = 1;
-      while (
-        [...this.tasks.values()].some(task => task.filename === formatted.options.filename) ||
-        (await checkFileExists(resolve(formatted.options.saveDir, formatted.options.filename)))
-      ) {
-        formatted.options.filename = `${basename(original, extension)} (${++suffix})${extension}`;
-      }
-    }
     const item: TaskItem = {
       ...existing,
       url,
@@ -195,7 +201,8 @@ export class DLServer {
       options: { ...merged, filename: formatted.options.filename },
       cacheDir: resolve(this.cacheDir, md5(url)),
     };
-    this.tasks.set(url, item);
+    if (existing) this.tasks.set(url, item);
+    else await this.reserveFilename(item, item.filename, formatted.options.saveDir);
     this.persist();
     this.broadcast(true);
     this.startNext();
@@ -204,13 +211,13 @@ export class DLServer {
   private startNext() {
     if (this.closing) return;
     const active = [...this.runs.values()];
-    let browserRunning = active.some(run => run.browserCapture);
-    let downloadsRunning = active.filter(run => !run.browserCapture).length;
+    let browsersRunning = active.filter(run => run.browserCapture).length;
+    let downloadsRunning = active.length - browsersRunning;
     for (const item of this.tasks.values()) {
       if (item.status !== 'pending' || this.runs.has(item.url)) continue;
       if (item.browserCapture) {
-        if (browserRunning) continue;
-        browserRunning = true;
+        if (browsersRunning >= this.cfg.maxDownloads) continue;
+        browsersRunning++;
       } else {
         if (downloadsRunning >= this.cfg.maxDownloads) continue;
         downloadsRunning++;
@@ -246,13 +253,15 @@ export class DLServer {
         signal: controller.signal,
         onProgress: (_finished, _total, _current, stats) => report(stats),
       };
+      const browserPage = item.url.startsWith('browser:');
       const result = item.browserCapture
         ? await runBrowserCapture(
             this.browserCapture,
-            item.url.startsWith('browser:') ? undefined : item.url,
+            browserPage ? undefined : item.url,
             item.cacheDir,
             runOptions,
-            report
+            report,
+            browserPage ? name => this.reserveFilename(item, name, runOptions.saveDir, controller.signal) : undefined
           )
         : await downloadResource(item.url, {
             ...runOptions,
@@ -292,18 +301,20 @@ export class DLServer {
     const app = this.app;
     app.post('/api/browser/open', async (_req, res) => {
       if (!this.browserCapture) throw new Error('未启用浏览器保存');
-      if (this.closing) throw new Error('服务正在关闭');
-      this.openingBrowser ??= (async () => {
-        for (const item of this.tasks.values()) {
-          if (item.browserCapture && ['pending', 'resume'].includes(item.status)) return item.url;
-        }
+      const opening = this.openingBrowser.then(async () => {
+        if (this.closing) throw new Error('服务正在关闭');
+        const running = [...this.runs.values()].filter(run => run.browserCapture).length;
+        const queued = [...this.tasks.values()].filter(item => item.browserCapture && item.status === 'pending').length;
+        if (running + queued >= this.cfg.maxDownloads) throw new Error(`浏览器窗口已达上限（${this.cfg.maxDownloads} 个）`);
         const url = `browser:${randomUUID()}`;
         await this.enqueue(url, { type: 'm3u8', filename: '浏览器保存' }, true);
         return url;
-      })().finally(() => {
-        this.openingBrowser = undefined;
       });
-      res.json({ code: 0, data: { url: await this.openingBrowser } });
+      this.openingBrowser = opening.then(
+        () => {},
+        () => {}
+      );
+      res.json({ code: 0, data: { url: await opening } });
     });
     app.post('/api/browser-capture', async (req, res) => {
       if (this.closing) throw new Error('服务正在关闭');

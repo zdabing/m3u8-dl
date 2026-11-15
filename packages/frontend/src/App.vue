@@ -36,6 +36,7 @@ const settingsOpen = ref(false);
 const newDownloadOpen = ref(false);
 const browserWindow = ref('');
 const browserBusy = ref(false);
+let browserViewer: Window | null = null;
 const detailsUrl = ref('');
 const detailsTask = computed(() => tasks.value[detailsUrl.value]);
 const segments = ref<SegmentSnapshot>({ fingerprint: '', items: [] });
@@ -335,16 +336,19 @@ async function openBrowserWindow() {
   if (connection.value !== 'online') { notify('连接下载器后可打开浏览器', true); return; }
   const viewer = browserWindow.value;
   if (!viewer) { notify('此容器未启用浏览器保存，请检查 Docker 的浏览器配置', true); return; }
-  const popup = window.open('about:blank', '_blank');
+  const newViewer = !browserViewer || browserViewer.closed;
+  const popup = newViewer ? window.open('about:blank', '_blank') : browserViewer;
   if (!popup) { notify('浏览器拦截了新窗口，请允许本站打开新窗口', true); return; }
-  popup.opener = null;
+  if (newViewer) popup.opener = null;
   browserBusy.value = true;
   try {
     await api('browser/open', {});
-    popup.location.replace(viewer);
+    if (newViewer) popup.location.replace(viewer);
+    browserViewer = popup;
+    popup.focus();
     tab.value = 'active';
   } catch (error) {
-    popup.close();
+    if (newViewer) popup.close();
     notify((error as Error).message, true);
   }
   finally { browserBusy.value = false; }

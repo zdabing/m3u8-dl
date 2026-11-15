@@ -39,6 +39,10 @@ SDK 恢复 `VideoParser.parse/download/getPlatform/getSupportedPlatforms`、`get
 
 Docker 镜像包含下载器和浏览器。启用后，点击下载器顶部的「浏览器」。窗口打开后，在 Chromium 地址栏输入网址并从头播放。保存任务自动创建，在下载列表显示分片进度，收齐后自动合并。暂停或关闭播放页会保留已写入的分片；重新开始需从头播放。
 
+成品默认以播放页标题命名。标题为空时沿用任务名，遇到同名文件时自动加上编号。
+
+想同时保存多个视频时，回到下载器再点一次「浏览器」。每次会在同一个远程桌面上打开一个新的 Chromium 窗口。窗口各自播放和保存，可用远程桌面的窗口列表切换。浏览器窗口数和普通下载任务数分别使用「同时下载任务」的上限，默认各 2 个。
+
 播放页和媒体域名需加入 `DS_BROWSER_ORIGINS`。支持带结束标记、未加密、音视频在同一流内的 MPEG-TS HLS。切换清晰度或快进跳过分片可能导致任务无法合并。直播、独立音轨、字幕、fMP4 和加密流可按各自适用的普通下载流程处理。
 
 在 `docker` 目录的 `.env` 中设置 `DS_SECRET`（下载器密码）、`DS_BROWSER_VNC_PASSWORD`（8 位英文字母或数字）和 `DS_BROWSER_ORIGINS`（逗号分隔的来源，如 `https://player.example.com,https://media.example.com`），然后拉取镜像并启动：
