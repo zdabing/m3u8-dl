@@ -35,24 +35,11 @@ pnpm start
 
 SDK 恢复 `VideoParser.parse/download/getPlatform/getSupportedPlatforms`、`getM3u8Urls`，另提供结构化 `extractMedia`；服务端提供鉴权后的 `/api/extract`、`/api/parse`、`/api/platforms`，并保留旧 `/api/getM3u8Urls` 返回格式。
 
-## 浏览器保存
+## Javrate 页面直下
 
-Docker 镜像包含下载器和浏览器。启用后，点击下载器顶部的「浏览器」。窗口打开后，在 Chromium 地址栏输入网址并从头播放。保存任务自动创建，在下载列表显示分片进度，收齐后自动合并。暂停或关闭播放页会保留已写入的分片；重新开始需从头播放。
+新建下载使用“自动识别”或“平台解析”，直接提交 Javrate 详情页网址。解析器优先读取同源播放器页面中已有的签名播放地址，也支持通过详情页的原始播放地址申请签名。下载期间，本机 HLS 代理在凭证到期前刷新，分片返回 403 时刷新并重试一次；并发请求共享刷新结果。子播放列表、密钥及初始化段使用同一代理，AES-128 解密和合并复用普通 HLS 下载流程。
 
-成品默认以播放页标题命名。标题为空时沿用任务名，遇到同名文件时自动加上编号。
-
-想同时保存多个视频时，回到下载器再点一次「浏览器」。每次会在同一个远程桌面上打开一个新的 Chromium 窗口。窗口各自播放和保存，可用远程桌面的窗口列表切换。浏览器窗口数和普通下载任务数分别使用「同时下载任务」的上限，默认各 2 个。
-
-播放页和媒体域名需加入 `DS_BROWSER_ORIGINS`。支持带结束标记、未加密、音视频在同一流内的 MPEG-TS HLS。切换清晰度或快进跳过分片可能导致任务无法合并。直播、独立音轨、字幕、fMP4 和加密流可按各自适用的普通下载流程处理。
-
-在 `docker` 目录的 `.env` 中设置 `DS_SECRET`（下载器密码）、`DS_BROWSER_VNC_PASSWORD`（8 位英文字母或数字）和 `DS_BROWSER_ORIGINS`（逗号分隔的来源，如 `https://player.example.com,https://media.example.com`），然后拉取镜像并启动：
-
-```sh
-docker compose pull
-docker compose up -d
-```
-
-也可以用 `docker compose up -d --build` 从源码构建。`DS_BROWSER_ORIGINS` 留空时只启动下载器。浏览器窗口默认只在宿主机通过 `http://localhost:6080/vnc.html` 打开。手机端可在私有网络中通过带身份验证的 HTTPS 反向代理访问此窗口，并把 `DS_BROWSER_WINDOW` 设为手机可打开的完整 noVNC URL。反向代理需支持 WebSocket；若代理运行在其他主机，`DS_BROWSER_BIND` 应设为代理可访问的宿主机地址。浏览器控制端口 `9323` 只监听容器内部回环地址。
+此路径使用 Node.js 和 FFmpeg。播放页触发 Cloudflare 验证、依赖脚本才能取得参数或站点接口变化时，会返回解析失败。跨来源请求会移除 Cookie 和 Authorization，更新签名限于同源媒体目录。已成功的分片缓存使用稳定资源地址识别，凭证变化后可继续复用。
 
 ## 请求头
 

@@ -12,7 +12,12 @@ export function detectPlatform(input: string) {
   try {
     const url = sourceUrl(input);
     const host = new URL(url).hostname.toLowerCase();
-    const domains = { douyin: ['douyin.com', 'iesdouyin.com'], weibo: ['weibo.com', 'weibo.cn', 't.cn'], pipixia: ['pipix.com'] };
+    const domains = {
+      douyin: ['douyin.com', 'iesdouyin.com'],
+      weibo: ['weibo.com', 'weibo.cn', 't.cn'],
+      pipixia: ['pipix.com'],
+      javrate: ['javrate.com'],
+    };
     for (const [platform, list] of Object.entries(domains))
       if (list.some(domain => host === domain || host.endsWith(`.${domain}`))) return { url, platform };
     return { url, platform: 'unknown' };

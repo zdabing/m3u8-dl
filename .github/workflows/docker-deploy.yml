@@ -184,25 +184,14 @@ jobs:
           tags: m3u8-dl:smoke
           cache-from: type=gha,scope=downloader
 
-      - name: Check downloader and browser in one container
+      - name: Check downloader container
         shell: bash
         run: |
-          docker run -d --name m3u8-dl-smoke --shm-size=512m \
-            -p 127.0.0.1:16600:6600 -p 127.0.0.1:16080:6080 \
-            -e DS_SECRET=smoke-test -e DS_BROWSER_ORIGINS=https://example.com \
-            -e DS_BROWSER_VNC_PASSWORD=Smoke123 m3u8-dl:smoke
+          docker run -d --name m3u8-dl-smoke -p 127.0.0.1:16600:6600 m3u8-dl:smoke
           trap 'docker logs m3u8-dl-smoke; docker rm -f m3u8-dl-smoke' EXIT
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:16600/healthcheck && \
-              curl -fsS -o /dev/null http://127.0.0.1:16080/vnc.html && \
-              docker exec m3u8-dl-smoke node -e 'const s=require("node:net").connect(9323,"127.0.0.1"); s.on("connect",()=>s.end()); s.on("error",()=>process.exit(1));'; then
-              open_browser() {
-                curl -fsS -H 'Authorization: smoke-test' -H 'Content-Type: application/json' \
-                  -d '{}' http://127.0.0.1:16600/api/browser/open | jq -er 'select(.code == 0) | .data.url | select(startswith("browser:"))'
-              }
-              first=$(open_browser)
-              second=$(open_browser)
-              test "$first" != "$second"
+            if curl -fsS http://127.0.0.1:16600/healthcheck; then
+              docker exec m3u8-dl-smoke sh -c '! command -v chromium && ! command -v chromium-browser && ffmpeg -version'
               exit 0
             fi
             sleep 2

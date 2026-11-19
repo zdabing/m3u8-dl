@@ -34,9 +34,7 @@ const headers = ref('');
 const advanced = ref(false);
 const settingsOpen = ref(false);
 const newDownloadOpen = ref(false);
-const browserWindow = ref('');
-const browserBusy = ref(false);
-let browserViewer: Window | null = null;
+
 const detailsUrl = ref('');
 const detailsTask = computed(() => tasks.value[detailsUrl.value]);
 const segments = ref<SegmentSnapshot>({ fingerprint: '', items: [] });
@@ -151,7 +149,7 @@ function connect() {
     if (socket !== ws) return;
     try {
       const message = JSON.parse(event.data);
-      if (message.type === 'serverInfo') { connection.value = 'online'; browserWindow.value = message.data.browserWindow || ''; }
+      if (message.type === 'serverInfo') { connection.value = 'online'; }
       if (message.type === 'tasks') { tasksRevision++; tasks.value = message.data; }
     } catch { notify('任务数据接收失败，正在重新同步', true); void load(); }
   };
@@ -332,27 +330,6 @@ async function details(task: TaskItem) {
 }
 function filterSegments(filter: 'all' | 'done' | 'error' | 'pending') { segmentFilter.value = filter; segmentPage.value = 1; }
 function fileUrl(task: TaskItem) { return `/api/file?url=${encodeURIComponent(task.url)}&token=${encodeURIComponent(token.value)}`; }
-async function openBrowserWindow() {
-  if (connection.value !== 'online') { notify('连接下载器后可打开浏览器', true); return; }
-  const viewer = browserWindow.value;
-  if (!viewer) { notify('此容器未启用浏览器保存，请检查 Docker 的浏览器配置', true); return; }
-  const newViewer = !browserViewer || browserViewer.closed;
-  const popup = newViewer ? window.open('about:blank', '_blank') : browserViewer;
-  if (!popup) { notify('浏览器拦截了新窗口，请允许本站打开新窗口', true); return; }
-  if (newViewer) popup.opener = null;
-  browserBusy.value = true;
-  try {
-    await api('browser/open', {});
-    if (newViewer) popup.location.replace(viewer);
-    browserViewer = popup;
-    popup.focus();
-    tab.value = 'active';
-  } catch (error) {
-    if (newViewer) popup.close();
-    notify((error as Error).message, true);
-  }
-  finally { browserBusy.value = false; }
-}
 function onVisible() { if (!document.hidden) { void load(); if (connection.value !== 'online') connect(); } }
 onMounted(() => { void load(); connect(); document.addEventListener('visibilitychange', onVisible); });
 onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmentTimer); clearTimeout(reconnectTimer); clearTimeout(noticeTimer); socket?.close(); document.documentElement.classList.remove('modal-open'); document.removeEventListener('visibilitychange', onVisible); });
@@ -361,7 +338,7 @@ onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmen
 <template>
   <div class="app-shell">
     <a class="skip-link" href="#main-content">跳到下载任务</a>
-    <header class="app-header"><a class="brand" href="/" aria-label="M3U8 下载器首页"><span class="brand-mark"><AppIcon name="bolt" :size="28" /></span><strong>M3U8 <span>DL</span></strong></a><div class="header-actions"><button type="button" class="button secondary browser-button" aria-label="打开浏览器" :disabled="browserBusy" @click="openBrowserWindow"><AppIcon name="browser" :size="17" /><span>浏览器</span></button><button type="button" class="button secondary extract-button" aria-label="打开网页提取" @click="newDownload('extract')"><AppIcon name="link" :size="17" /><span>网页提取</span></button><button type="button" class="button primary new-button" @click="newDownload('download')"><AppIcon name="plus" :size="17" />新建下载</button><button type="button" class="button secondary settings-button" aria-label="打开下载设置" @click="settings"><AppIcon name="settings" :size="17" /><span>设置</span></button></div></header>
+    <header class="app-header"><a class="brand" href="/" aria-label="M3U8 下载器首页"><span class="brand-mark"><AppIcon name="bolt" :size="28" /></span><strong>M3U8 <span>DL</span></strong></a><div class="header-actions"><button type="button" class="button secondary extract-button" aria-label="打开网页提取" @click="newDownload('extract')"><AppIcon name="link" :size="17" /><span>网页提取</span></button><button type="button" class="button primary new-button" @click="newDownload('download')"><AppIcon name="plus" :size="17" />新建下载</button><button type="button" class="button secondary settings-button" aria-label="打开下载设置" @click="settings"><AppIcon name="settings" :size="17" /><span>设置</span></button></div></header>
     <main id="main-content" class="workspace" tabindex="-1">
       <div class="workspace-heading"><div><h1>下载任务</h1><p>视频、字幕与网页媒体，集中管理。</p></div><div class="workspace-status"><div class="connection" :class="connection" role="status"><i />{{ connection === 'online' ? '服务已连接' : connection === 'connecting' ? '正在连接' : '服务未连接' }}</div><span class="heading-speed"><AppIcon name="arrow" :size="15" /><strong>{{ bytes(speed) }}<small>/s</small></strong><span>{{ running }} 个运行中</span></span></div></div>
       <div v-if="connection === 'offline'" class="offline-banner" role="status"><AppIcon name="info" :size="16" />服务连接已断开，正在自动重连。<button type="button" @click="connect(); load()">重新连接</button></div>
@@ -405,7 +382,7 @@ onBeforeUnmount(() => { stopped = true; cancelExtraction(); clearInterval(segmen
             <div class="entry-modes"><button type="button" :class="{ selected: entryMode === 'download' }" :aria-pressed="entryMode === 'download'" @click="switchEntry('download')">直链 / 分享链接</button><button type="button" :class="{ selected: entryMode === 'extract' }" :aria-pressed="entryMode === 'extract'" @click="switchEntry('extract')">网页提取</button></div>
             <div class="input-caption"><label for="urls">{{ entryMode === 'extract' ? '网页或分享链接' : '下载链接' }} <span class="field-note">{{ entryMode === 'extract' ? '最多 20 个网页' : '一行一个，最多 100 个' }}</span></label><span v-if="lines.length" class="link-count">{{ lines.length }} 个链接</span></div>
             <textarea id="urls" ref="inputRef" v-model="urls" class="url-input" rows="5" :placeholder="entryMode === 'extract' ? 'https://example.com/watch/123' : 'https://example.com/index.m3u8'" :disabled="extractBusy" required spellcheck="false" autocapitalize="off" />
-            <template v-if="entryMode === 'download'"><div class="form-grid download-options"><div><label for="download-type">下载类型</label><select id="download-type" v-model="downloadType"><option value="auto">自动识别（含平台分享链接）</option><option value="m3u8">M3U8 / HLS 播放列表</option><option value="file">普通文件直链（MP4、VTT 等）</option><option value="parser">平台解析（抖音 / 微博 / 皮皮虾）</option></select></div><div><label for="filename">文件名称 <span class="field-note">可选</span></label><input id="filename" v-model="title" placeholder="不填则自动生成" maxlength="150" /></div></div><p class="field-help">支持 M3U8、MP4、VTT 与抖音 / 微博 / 皮皮虾分享链接。无后缀文件请选择「普通文件」，伪装后缀的播放列表请选择「M3U8」。微博需填写 Cookie。</p></template>
+            <template v-if="entryMode === 'download'"><div class="form-grid download-options"><div><label for="download-type">下载类型</label><select id="download-type" v-model="downloadType"><option value="auto">自动识别（含平台分享链接）</option><option value="m3u8">M3U8 / HLS 播放列表</option><option value="file">普通文件直链（MP4、VTT 等）</option><option value="parser">平台解析（含 Javrate）</option></select></div><div><label for="filename">文件名称 <span class="field-note">可选</span></label><input id="filename" v-model="title" placeholder="不填则自动生成" maxlength="150" /></div></div><p class="field-help">支持 M3U8、MP4、VTT 与抖音 / 微博 / 皮皮虾 / Javrate 页面链接。无后缀文件请选择「普通文件」，伪装后缀的播放列表请选择「M3U8」。微博需填写 Cookie。</p></template>
             <template v-else><div class="form-grid extraction-options"><div><label for="extract-depth">搜索深度</label><select id="extract-depth" v-model.number="extractDepth" :disabled="extractBusy"><option :value="0">仅当前页面</option><option :value="1">向下 1 层</option><option :value="2">向下 2 层</option><option :value="3">向下 3 层</option></select></div><div><label for="extract-path">子页面路径 <span class="field-note">可选</span></label><input id="extract-path" v-model="extractPath" :disabled="extractBusy" placeholder="例如 /play/" /></div></div><p class="field-help">搜索站内链接和播放器 iframe，最多读取 30 页；不会执行网页脚本。</p><button type="button" class="button secondary extract-run" :disabled="!lines.length || modalBusy" @click="runExtraction"><span v-if="extractBusy" class="spinner" /><AppIcon v-else name="search" :size="16" />{{ extractBusy ? '取消提取' : '解析并提取' }}</button>
               <section v-if="extracted" class="extraction-result" aria-label="提取结果"><div class="extraction-summary"><label class="task-checkbox"><input type="checkbox" :checked="!!extracted.items.length && selectedExtracted.length === extracted.items.length" :indeterminate="selectedExtracted.length > 0 && selectedExtracted.length < extracted.items.length" :disabled="!extracted.items.length" @change="toggleExtractedAll" /><span>找到 {{ extracted.items.length }} 个，已选 {{ selectedExtracted.length }} 个</span></label><small>已读取 {{ extracted.pagesVisited }} 页</small></div><p v-if="!extracted.items.length" class="field-help">未找到可下载的媒体。可调整深度、补充 Cookie，或使用实际播放页地址。</p><ul v-else class="extracted-list"><li v-for="item in extracted.items" :key="item.url"><label class="extracted-item"><input v-model="extractedSelection" type="checkbox" :value="item.url" /><span><strong>{{ item.title || host(item.url) }}</strong><small>{{ item.platform || item.type.toUpperCase() }} · {{ host(item.source) }}</small><span class="extracted-url" :title="item.url">{{ item.url }}</span></span></label></li></ul><p v-if="extracted.truncated" class="field-help">已达到提取上限，可缩小范围后继续提取。</p><details v-if="extracted.errors.length" class="extraction-errors"><summary>{{ extracted.errors.length }} 个页面提取失败，查看原因</summary><p v-for="error in extracted.errors" :key="error.url">{{ host(error.url) }}：{{ error.message }}</p></details></section>
             </template>

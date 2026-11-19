@@ -76,7 +76,7 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
     const existing = resolve(options.saveDir, options.filename);
     if (!options.force && existsSync(existing)) return { ...result, filepath: existing, isExist: true };
     report();
-    const info = await parseM3U8(url, cacheDir, options.headers, signal);
+    const info = await parseM3U8(url, cacheDir, options.headers, signal, options.segmentIdentity);
     result.m3u8Info = info;
     if (options.ignoreSegments) {
       const ranges = options.ignoreSegments.split(',').map(range => {
@@ -96,7 +96,11 @@ export async function m3u8Download(input: string, supplied: M3u8DLOptions = {}, 
     if (!info.tsCount) throw new Error('过滤后没有可下载的视频分片');
     await fs.mkdir(cacheDir, { recursive: true });
     await fs.writeFile(resolve(cacheDir, 'info.json'), JSON.stringify({ url, filename: options.filename }));
-    const fingerprint = md5(info.data.map(segment => `${segment.uri}@${JSON.stringify(segment.byterange || null)}`).join('\n'));
+    const fingerprint = md5(
+      info.data
+        .map(segment => `${options.segmentIdentity?.(segment.uri) || segment.uri}@${JSON.stringify(segment.byterange || null)}`)
+        .join('\n')
+    );
     let previous: SegmentSnapshot;
     try {
       previous = JSON.parse(await fs.readFile(statePath, 'utf8'));

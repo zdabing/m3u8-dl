@@ -141,6 +141,8 @@ export interface M3u8DLProgressStats extends DownloadStats {
 }
 
 export interface M3u8DLOptions {
+  /** SDK resource identity override for a per-download local signing proxy. */
+  segmentIdentity?: (url: string) => string;
   /** Automatic URL extension detection, HLS, or a direct file download. */
   type?: 'auto' | 'm3u8' | 'file' | 'parser';
   /** Page from which this media URL was extracted. */

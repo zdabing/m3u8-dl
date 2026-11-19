@@ -62,7 +62,6 @@ export interface QueueStatus {
 }
 export interface ServerInfo {
   version: string;
-  browserWindow?: string;
 }
 export interface ServerConfig {
   threadNum: number;

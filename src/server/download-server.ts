@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir } from 'node:os';
@@ -14,7 +13,6 @@ import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.
 import type { M3u8DLOptions } from '../types/m3u8.js';
 import { VideoParser } from '../video-parser/index.js';
 import { sourceUrl } from '../video-parser/platform.js';
-import { browserCaptureConfig, runBrowserCapture, validateBrowserSource } from './browser-capture.js';
 import { catCatchTasks } from './cat-catch.js';
 
 interface DLServerOptions {
@@ -25,7 +23,6 @@ interface DLServerOptions {
   token?: string;
 }
 interface Run {
-  browserCapture?: boolean;
   controller: AbortController;
   completion: Promise<void>;
 }
@@ -36,7 +33,6 @@ export class DLServer {
   wss: WebSocketServer;
   ready: Promise<void>;
   private token: string;
-  private browserCapture: ReturnType<typeof browserCaptureConfig>;
   private cacheDir: string;
   private configPath: string;
   private tasks = new Map<string, TaskItem>();
@@ -47,8 +43,6 @@ export class DLServer {
   private version = '1.10.0';
   private closing = false;
   private extractions = new Set<AbortController>();
-  private browserSubmissions = new Set<string>();
-  private openingBrowser = Promise.resolve();
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -65,7 +59,6 @@ export class DLServer {
     this.cacheDir = resolve(options.cacheDir || process.env.DS_CACHE_DIR || resolve(homedir(), '.m3u8-dl/cache'));
     this.configPath = options.configPath || resolve(this.cacheDir, 'config.json');
     this.token = options.token || process.env.DS_SECRET || process.env.DS_TOKEN || '';
-    this.browserCapture = this.token.trim() ? browserCaptureConfig() : undefined;
     this.server = createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
     this.ready = this.init(options.port ?? (Number(process.env.DS_PORT) || 6600));
@@ -122,7 +115,7 @@ export class DLServer {
         ws.close(1008, 'Unauthorized');
         return;
       }
-      ws.send(JSON.stringify({ type: 'serverInfo', data: { version: this.version, browserWindow: this.browserCapture?.viewer } }));
+      ws.send(JSON.stringify({ type: 'serverInfo', data: { version: this.version } }));
       ws.send(JSON.stringify({ type: 'tasks', data: Object.fromEntries(this.tasks) }));
     });
     await new Promise<void>((resolveReady, reject) => {
@@ -181,7 +174,8 @@ export class DLServer {
     }
   }
   private async enqueue(input: string, options: M3u8DLOptions & { useDefaultHeaders?: boolean } = {}, browserCapture = false) {
-    const url = browserCapture && input.startsWith('browser:') ? input : sourceUrl(input);
+    if (browserCapture || input.startsWith('browser:')) throw new Error('浏览器保存已移除，请提交网页或媒体链接重新下载');
+    const url = sourceUrl(input);
     const existing = this.tasks.get(url);
     if (this.runs.has(url) || existing?.status === 'done') return false;
     if (existing && !!existing.browserCapture !== browserCapture) return false;
@@ -210,22 +204,13 @@ export class DLServer {
   }
   private startNext() {
     if (this.closing) return;
-    const active = [...this.runs.values()];
-    let browsersRunning = active.filter(run => run.browserCapture).length;
-    let downloadsRunning = active.length - browsersRunning;
     for (const item of this.tasks.values()) {
+      if (this.runs.size >= this.cfg.maxDownloads) break;
       if (item.status !== 'pending' || this.runs.has(item.url)) continue;
-      if (item.browserCapture) {
-        if (browsersRunning >= this.cfg.maxDownloads) continue;
-        browsersRunning++;
-      } else {
-        if (downloadsRunning >= this.cfg.maxDownloads) continue;
-        downloadsRunning++;
-      }
       item.status = 'resume';
       const controller = new AbortController();
       // Reserve the slot before run() can emit its first progress update.
-      const run: Run = { browserCapture: item.browserCapture, controller, completion: Promise.resolve() };
+      const run: Run = { controller, completion: Promise.resolve() };
       this.runs.set(item.url, run);
       run.completion = this.run(item, controller).finally(() => {
         this.runs.delete(item.url);
@@ -253,23 +238,14 @@ export class DLServer {
         signal: controller.signal,
         onProgress: (_finished, _total, _current, stats) => report(stats),
       };
-      const browserPage = item.url.startsWith('browser:');
-      const result = item.browserCapture
-        ? await runBrowserCapture(
-            this.browserCapture,
-            browserPage ? undefined : item.url,
-            item.cacheDir,
-            runOptions,
-            report,
-            browserPage ? name => this.reserveFilename(item, name, runOptions.saveDir, controller.signal) : undefined
-          )
-        : await downloadResource(item.url, {
-            ...runOptions,
-            headers: {
-              ...(item.options?.useDefaultHeaders === false ? {} : formatHeaders(this.cfg.headers)),
-              ...formatHeaders(options?.headers),
-            },
-          });
+      if (item.browserCapture) throw new Error('浏览器保存已移除，请提交网页或媒体链接重新下载');
+      const result = await downloadResource(item.url, {
+        ...runOptions,
+        headers: {
+          ...(item.options?.useDefaultHeaders === false ? {} : formatHeaders(this.cfg.headers)),
+          ...formatHeaders(options?.headers),
+        },
+      });
       if (!this.tasks.has(item.url)) return;
       if (result.paused || controller.signal.aborted) item.status = 'pause';
       else if (result.errmsg) {
@@ -299,36 +275,6 @@ export class DLServer {
   }
   private routes() {
     const app = this.app;
-    app.post('/api/browser/open', async (_req, res) => {
-      if (!this.browserCapture) throw new Error('未启用浏览器保存');
-      const opening = this.openingBrowser.then(async () => {
-        if (this.closing) throw new Error('服务正在关闭');
-        const running = [...this.runs.values()].filter(run => run.browserCapture).length;
-        const queued = [...this.tasks.values()].filter(item => item.browserCapture && item.status === 'pending').length;
-        if (running + queued >= this.cfg.maxDownloads) throw new Error(`浏览器窗口已达上限（${this.cfg.maxDownloads} 个）`);
-        const url = `browser:${randomUUID()}`;
-        await this.enqueue(url, { type: 'm3u8', filename: '浏览器保存' }, true);
-        return url;
-      });
-      this.openingBrowser = opening.then(
-        () => {},
-        () => {}
-      );
-      res.json({ code: 0, data: { url: await opening } });
-    });
-    app.post('/api/browser-capture', async (req, res) => {
-      if (this.closing) throw new Error('服务正在关闭');
-      const url = validateBrowserSource(this.browserCapture, req.body?.url);
-      const filename = typeof req.body.filename === 'string' ? req.body.filename.trim().slice(0, 150) : '';
-      if (this.browserSubmissions.has(url)) throw new Error('该页面正在创建保存任务');
-      this.browserSubmissions.add(url);
-      try {
-        if (!(await this.enqueue(url, { type: 'm3u8', filename }, true))) throw new Error('该页面已有正在运行或已完成的任务');
-        res.json({ code: 0, message: '浏览器保存任务已加入队列' });
-      } finally {
-        this.browserSubmissions.delete(url);
-      }
-    });
     app.get('/api/platforms', (_req, res) => res.json({ code: 0, data: VideoParser.getSupportedPlatforms() }));
     app.post(['/api/extract', '/api/getM3u8Urls', '/api/parse'], async (req, res) => {
       if (this.closing) throw new Error('服务正在关闭');

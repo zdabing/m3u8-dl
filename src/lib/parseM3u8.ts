@@ -17,7 +17,13 @@ type HeadersFor = (target: string) => OutgoingHttpHeaders | string | undefined;
  * @param content m3u8 文件的内容，可为 http 远程地址、本地文件路径
  * @param cacheDir 缓存文件保存目录
  */
-export async function parseM3U8(content: string, cacheDir = './cache', headers?: OutgoingHttpHeaders | string, signal?: AbortSignal) {
+export async function parseM3U8(
+  content: string,
+  cacheDir = './cache',
+  headers?: OutgoingHttpHeaders | string,
+  signal?: AbortSignal,
+  identity = (url: string) => url
+) {
   let url = process.cwd();
   const credentialSource = /^https?:\/\//i.test(content) ? content : undefined;
   const headersFor: HeadersFor = target => (credentialSource ? scopeCredentials(credentialSource, target, headers) : headers);
@@ -122,7 +128,8 @@ export async function parseM3U8(content: string, cacheDir = './cache', headers?:
     if (byterange) lastByteEnd.set(item.uri, (byterange.offset ?? 0) + byterange.length);
 
     // 有 byterange 时纳入区间信息作为缓存文件名种子，避免共用 url 的分片相互覆盖
-    const nameSeed = byterange ? `${item.uri}@${byterange.offset ?? 0}+${byterange.length}` : item.uri;
+    const resourceIdentity = identity(item.uri);
+    const nameSeed = byterange ? `${resourceIdentity}@${byterange.offset ?? 0}+${byterange.length}` : resourceIdentity;
 
     result.data.push({
       index: i,
