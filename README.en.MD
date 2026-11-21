@@ -1,12 +1,17 @@
-# Lightweight M3U8 downloader
+# M3U8 Downloader
 
-A focused fork of [lzwme/m3u8-dl](https://github.com/lzwme/m3u8-dl): HLS/direct-file download, share-link parsing, web media extraction, resume, lossless merge, and a responsive Chinese WebUI. The embedded player/browser, search sites, capture userscript, AriaNg and Electron packages remain removed.
+A media downloader with a desktop and mobile WebUI, based on [lzwme/m3u8-dl](https://github.com/lzwme/m3u8-dl).
 
-Douyin, Weibo and Pipixia share links automatically select a platform parser; Weibo requires a valid Cookie. The WebUI's extraction mode accepts up to 20 pages/share links and supports 0–3 levels of same-origin links and player iframes, with selectable batch results. Each extraction is bounded by 30 pages, 100 results, 5 MB per decoded page and 60 seconds. Remote scripts are never executed. Platform/login changes can prevent parsing, and watermark-free output depends on the source response. SDK exports include `VideoParser`, `getM3u8Urls` and structured `extractMedia`; the CLI provides `extract <urls...> --depth 2`. Source credentials are stripped when visiting another origin or downloading from a CDN.
+- HLS downloads, AES-128 decryption and FFmpeg merging.
+- Direct media and subtitle downloads, including MP4, VTT and SRT.
+- Web media extraction and selected platform link parsing.
+- Batch queues, pause/resume and retry.
+- ScriptCat integration to send media URLs, request information, page titles and source pages.
+- WebUI, CLI and SDK.
 
-Direct media and subtitle files (including MP4 and VTT) are supported in the same queue. Auto mode detects common media/subtitle extensions from the URL path; use `-T file` or the WebUI file mode for extensionless URLs, and `-T m3u8` for playlists disguised as media files. Files stream to disk unchanged, with progress, cancellation and validated Range resume when supported. VTT remains a separate subtitle file. The SDK exports `downloadResource` and `fileDownload`; batch downloads accept mixed links. Task selection supports batch pause, resume/retry and confirmed removal on desktop and mobile.
+## Run
 
-Requires Node.js 22.12+, pnpm, and preferably FFmpeg on PATH.
+Requires Node.js 22.12+, pnpm and FFmpeg.
 
 ```sh
 pnpm install
@@ -14,10 +19,18 @@ pnpm build
 pnpm start
 ```
 
-Open http://localhost:6600. Automatic browser User-Agent and same-origin Referer are sent for manifests, keys and fragments. Custom headers override defaults; configure the actual source page or Cookie if needed. Both line-based headers and JSON are accepted. Disguised extensions are supported.
+Open `http://localhost:6600`. Files are saved to `./downloads`.
 
-Merging uses streaming input, bounded memory, one asynchronous FFmpeg process at a time, progress reporting, cancellation and a configurable idle timeout. Failed or cancelled merges preserve caches; only completed output is published. Without FFmpeg, TS is concatenated to `.ts` and fMP4 is joined with its initialization segment.
+For Docker, create `.env` with `DS_SECRET=your-password`, then run:
 
-CLI: `node bin/m3u8dl.js --help`. Server: `pnpm start`. Data lives in `~/.m3u8-dl/cache`, videos in `./downloads`. Set `DS_SECRET` for access control. Environment variables and further details: [中文文档](README.MD).
+```sh
+docker compose -f docker/docker-compose.yml up --build -d
+```
 
-Checks: `pnpm test`, `pnpm lint:all`, `pnpm typecheck`, `pnpm build`. MIT license.
+Open `http://SERVER-IP:6600`. Docker files and cache are stored in `docker/downloads` and `docker/cache`.
+
+Install the ScriptCat script from the homepage, configure your downloader address and password, then select media on the playback page to send. Short-lived tokens may expire; continuous token renewal through ScriptCat is not implemented. Extraction depends on the source website.
+
+CLI: `node bin/m3u8dl.js --help`. More information: [中文说明](README.MD).
+
+MIT license. See [LICENSE](LICENSE).

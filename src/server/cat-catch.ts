@@ -5,6 +5,28 @@ import { md5, normalizeDownloadUrl } from '../lib/utils.js';
 import type { TaskOptions } from '../types/contract.js';
 
 const supportedHeaders = new Set(['referer', 'origin', 'cookie', 'user-agent', 'authorization']);
+const mimeExtensions: Record<string, string> = {
+  'audio/mpeg': '.mp3',
+  'audio/mp3': '.mp3',
+  'audio/x-mp3': '.mp3',
+  'audio/x-mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/x-m4a': '.m4a',
+  'audio/aacp': '.aac',
+  'audio/x-aac': '.aac',
+  'audio/x-wav': '.wav',
+  'audio/wave': '.wav',
+  'audio/vnd.wave': '.wav',
+  'audio/x-flac': '.flac',
+  'audio/webm': '.weba',
+  'video/x-matroska': '.mkv',
+  'video/quicktime': '.mov',
+  'text/vtt': '.vtt',
+  'application/x-subrip': '.srt',
+  'text/x-srt': '.srt',
+  'text/x-ass': '.ass',
+  'text/x-ssa': '.ssa',
+};
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 const string = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
@@ -21,7 +43,7 @@ export function catCatchTasks(payload: unknown): (TaskOptions & { url: string })
     const headers: Record<string, string> = {};
     const addHeader = (name: string, value: unknown) => {
       const key = name.trim().toLowerCase();
-      if (!supportedHeaders.has(key) || typeof value !== 'string' || !value.trim()) return;
+      if (!supportedHeaders.has(key) || typeof value !== 'string' || (!value.trim() && key !== 'referer')) return;
       try {
         validateHeaderValue(key, value);
       } catch {
@@ -42,8 +64,7 @@ export function catCatchTasks(payload: unknown): (TaskOptions & { url: string })
     }
 
     const mime = string(data.type).toLowerCase().split(';')[0].trim();
-    const mimeExt =
-      mime === 'text/vtt' ? '.vtt' : ['application/x-subrip', 'text/srt'].includes(mime) ? '.srt' : `.${mime.split('/')[1] || ''}`;
+    const mimeExt = mimeExtensions[mime] || `.${mime.split('/')[1] || ''}`;
     const hint = `.${string(data.ext).toLowerCase().replace(/^\./, '')}`;
     const pathname = new URL(url).pathname;
     const urlExt = extname(pathname).toLowerCase();
@@ -52,7 +73,7 @@ export function catCatchTasks(payload: unknown): (TaskOptions & { url: string })
     const hints = [hint, urlExt, nameExt];
     if (hints.includes('.mpd') || mime === 'application/dash+xml') throw new Error('当前下载器不支持 DASH/MPD');
     const hls = /mpegurl/.test(mime) || hints.some(ext => ext === '.m3u8' || ext === '.m3u');
-    const fileExt = [mimeExt, ...hints].map(ext => (ext === '.x-subrip' ? '.srt' : ext)).find(ext => directFileExtensions.includes(ext));
+    const fileExt = [...hints, mimeExt].find(ext => directFileExtensions.includes(ext));
     const base = (name || string(data.title) || pathname.split('/').pop() || md5(url)).split(/[\\/]/).pop().slice(0, 120);
     const filename =
       hls && base
@@ -60,6 +81,8 @@ export function catCatchTasks(payload: unknown): (TaskOptions & { url: string })
         : fileExt && base && !base.toLowerCase().endsWith(fileExt)
           ? `${base}${fileExt}`
           : base || undefined;
-    return { url, filename, type: !hls && fileExt ? 'file' : 'm3u8', headers, useDefaultHeaders: false };
+    const sourceUrl = string(data.sourceUrl) ? normalizeDownloadUrl(string(data.sourceUrl)) : undefined;
+    // The sender supplies credentials for the media URL, not the descriptive source page.
+    return { url, filename, sourceUrl, headerSourceUrl: url, type: !hls && fileExt ? 'file' : 'm3u8', headers, useDefaultHeaders: false };
   });
 }

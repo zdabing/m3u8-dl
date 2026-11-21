@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#f5f7fb" />
+  <meta name="theme-color" content="#edf0f5" />
   <meta name="description" content="轻量视频与字幕下载器，支持 M3U8、MP4、VTT、网页媒体提取、批量下载和断点续传。" />
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23edf4ff'/%3E%3Cpath d='m18 4-12 14h9l-1 10L26 12h-9l1-8Z' fill='none' stroke='%23256bd6' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e5f1ff'/%3E%3Cpath d='m18 4-12 14h9l-1 10L26 12h-9l1-8Z' fill='none' stroke='%23007aff' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <script>
+    (function(){try{var s=localStorage.getItem('m3u8-skin');var skin=(s==='meridian'||s==='apple')?s:'apple';var t=localStorage.getItem('m3u8-theme');var dark=(t==='dark')||(t!=='light'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);var theme=dark?'dark':'light';document.documentElement.dataset.skin=skin;document.documentElement.dataset.theme=theme;var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content',skin==='meridian'?(theme==='dark'?'#000000':'#f4f4f6'):(theme==='dark'?'#17191e':'#edf0f5'));}catch(e){document.documentElement.dataset.skin='apple';document.documentElement.dataset.theme='light';}})();
+  </script>
   <title>M3U8 / 下载器</title>
 </head>
 <body><div id="app"></div><script type="module" src="/src/main.ts"></script></body>

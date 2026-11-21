@@ -69,6 +69,7 @@
     "client/index.html",
     "client/assets",
     "bin",
+    "examples/scriptcat-downloader.user.js",
     "src/types/contract.ts"
   ]
 }

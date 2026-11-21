@@ -42,10 +42,7 @@ pnpm-lock.yaml
 /*.mp4
 /client/*.html
 /client/logo.png
-/client/ariang/
 /client/assets/
-/client/local/cdn/
-!/client/local/cdn/font-awesome/
 
 .codegraph
 

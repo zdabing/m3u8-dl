@@ -20,6 +20,8 @@ export const directFileExtensions = [
   '.m4a',
   '.aac',
   '.flac',
+  '.opus',
+  '.weba',
   '.vtt',
   '.srt',
   '.ass',

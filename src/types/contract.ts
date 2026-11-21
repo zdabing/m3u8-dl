@@ -63,6 +63,17 @@ export interface QueueStatus {
 export interface ServerInfo {
   version: string;
 }
+export interface RssBridgeFeed {
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: 'rss' | 'html';
+  url: string;
+  itemPattern?: string;
+  referer?: string;
+  limit: number;
+  cacheTtl: number;
+}
 export interface ServerConfig {
   threadNum: number;
   saveDir: string;
@@ -74,6 +85,12 @@ export interface ServerConfig {
   proxyMode: 'custom' | 'system' | 'disabled';
   proxyUrl: string;
   noProxy: string;
+  rssBridgeEnabled?: boolean;
+  rssBridgeFeedUrl?: string;
+  rssBridgeLimit?: number;
+  rssBridgeReferer?: string;
+  rssBridgeCacheTtl?: number;
+  rssBridgeFeeds?: RssBridgeFeed[];
 }
 export interface ApiResponse<T = unknown> {
   code: number;

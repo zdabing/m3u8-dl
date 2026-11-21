@@ -9,11 +9,54 @@ import { formatOptions } from '../lib/format-options.js';
 import { extractMedia } from '../lib/getM3u8Urls.js';
 import { initProxy } from '../lib/init-proxy.js';
 import { checkFileExists, formatHeaders, logger, md5, normalizeDownloadUrl } from '../lib/utils.js';
-import type { SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.js';
+import type { RssBridgeFeed, SegmentSnapshot, ServerConfig, TaskItem } from '../types/contract.js';
 import type { M3u8DLOptions } from '../types/m3u8.js';
 import { VideoParser } from '../video-parser/index.js';
 import { sourceUrl } from '../video-parser/platform.js';
 import { catCatchTasks } from './cat-catch.js';
+import { defaultRssBridgeFeeds, RssBridgeService } from './rss-bridge.js';
+
+function validateHttpHref(raw: unknown, label: string, required = true) {
+  if (typeof raw !== 'string') throw new Error(`${label}无效`);
+  const text = raw.trim();
+  if (!text) {
+    if (required) throw new Error(`${label}不能为空`);
+    return '';
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error(`${label}应为有效的 http 或 https 地址`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`${label}应为 http 或 https 地址`);
+  return parsed.href;
+}
+
+function validateRssFeeds(input: unknown): RssBridgeFeed[] {
+  if (!Array.isArray(input) || input.length > 30) throw new Error('订阅源列表最多支持 30 个');
+  const seen = new Set<string>();
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`第 ${index + 1} 个订阅源格式无效`);
+    const item = entry as Partial<RssBridgeFeed>;
+    const id = typeof item.id === 'string' ? item.id.trim() : '';
+    if (!/^[a-zA-Z0-9_-]{1,40}$/.test(id)) throw new Error('订阅源 ID 仅支持 1–40 位字母、数字、下划线或短横线');
+    const lower = id.toLowerCase();
+    if (seen.has(lower)) throw new Error(`订阅源 ID 重复: ${id}`);
+    seen.add(lower);
+    const name = (typeof item.name === 'string' ? item.name.trim() : '').slice(0, 60) || id;
+    if (typeof item.enabled !== 'boolean') throw new Error(`订阅源 ${id} 启用状态无效`);
+    if (item.mode !== 'rss' && item.mode !== 'html') throw new Error(`订阅源 ${id} 模式应为 rss 或 html`);
+    const url = validateHttpHref(item.url, `订阅源 ${id} 地址`, true);
+    const itemPattern = typeof item.itemPattern === 'string' ? item.itemPattern.trim() : '';
+    if (itemPattern.length > 200) throw new Error(`订阅源 ${id} 链接筛选词最多 200 个字符`);
+    const referer = item.referer === undefined ? '' : validateHttpHref(item.referer, `订阅源 ${id} Referer`, false);
+    if (!Number.isInteger(item.limit) || item.limit < 1 || item.limit > 50) throw new Error(`订阅源 ${id} 保留条数应为 1–50`);
+    if (!Number.isInteger(item.cacheTtl) || item.cacheTtl < 0 || item.cacheTtl > 86400)
+      throw new Error(`订阅源 ${id} 缓存时长应为 0–86400 秒`);
+    return { id, name, enabled: item.enabled, mode: item.mode, url, itemPattern, referer, limit: item.limit, cacheTtl: item.cacheTtl };
+  });
+}
 
 interface DLServerOptions {
   port?: number;
@@ -43,6 +86,7 @@ export class DLServer {
   private version = '1.10.0';
   private closing = false;
   private extractions = new Set<AbortController>();
+  private rssBridge: RssBridgeService;
   private cfg: ServerConfig = {
     saveDir: process.env.DS_SAVE_DIR || './downloads',
     threadNum: 4,
@@ -54,11 +98,18 @@ export class DLServer {
     proxyMode: (process.env.DS_PROXY_MODE || 'system') as ServerConfig['proxyMode'],
     proxyUrl: process.env.DS_PROXY_URL || '',
     noProxy: process.env.DS_NO_PROXY || '',
+    rssBridgeEnabled: ['1', 'true', 'yes'].includes(String(process.env.DS_RSS_BRIDGE_ENABLED || '').toLowerCase()),
+    rssBridgeFeedUrl: process.env.DS_RSS_BRIDGE_FEED_URL || 'https://tangxinvlog.app/rss.xml',
+    rssBridgeLimit: Math.min(50, Math.max(1, Number.parseInt(process.env.DS_RSS_BRIDGE_LIMIT || '20', 10) || 20)),
+    rssBridgeReferer: process.env.DS_RSS_BRIDGE_REFERER || '',
+    rssBridgeCacheTtl: Math.min(86400, Math.max(0, Number.parseInt(process.env.DS_RSS_BRIDGE_CACHE_TTL || '300', 10) || 300)),
   };
   constructor(options: DLServerOptions = {}) {
     this.cacheDir = resolve(options.cacheDir || process.env.DS_CACHE_DIR || resolve(homedir(), '.m3u8-dl/cache'));
     this.configPath = options.configPath || resolve(this.cacheDir, 'config.json');
     this.token = options.token || process.env.DS_SECRET || process.env.DS_TOKEN || '';
+    this.cfg.rssBridgeFeeds = defaultRssBridgeFeeds(this.cfg);
+    this.rssBridge = new RssBridgeService(this.cacheDir, () => this.cfg);
     this.server = createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
     this.ready = this.init(options.port ?? (Number(process.env.DS_PORT) || 6600));
@@ -77,6 +128,14 @@ export class DLServer {
       }
       if (typeof this.cfg.headers !== 'string') this.cfg.headers = JSON.stringify(this.cfg.headers);
       this.cfg.maxDownloads = Math.min(5, Math.max(1, Number(this.cfg.maxDownloads) || 2));
+      this.cfg.rssBridgeEnabled = Boolean(this.cfg.rssBridgeEnabled);
+      this.cfg.rssBridgeLimit = Math.min(50, Math.max(1, Number(this.cfg.rssBridgeLimit) || 20));
+      const rssTtl = Number(this.cfg.rssBridgeCacheTtl);
+      this.cfg.rssBridgeCacheTtl = Number.isInteger(rssTtl) ? Math.min(86400, Math.max(0, rssTtl)) : 300;
+      this.cfg.rssBridgeFeeds = defaultRssBridgeFeeds({
+        ...this.cfg,
+        rssBridgeFeeds: Array.isArray(config.rssBridgeFeeds) ? config.rssBridgeFeeds : undefined,
+      });
     } catch {
       /* First launch. */
     }
@@ -90,9 +149,31 @@ export class DLServer {
     } catch {
       /* No existing tasks. */
     }
+    await this.rssBridge.init();
     await initProxy(this.cfg);
     this.app.use(express.json({ limit: '1mb' }));
     this.app.get('/healthcheck', (_req, res) => res.json({ code: 0, message: 'ok' }));
+    this.app.get('/scriptcat.user.js', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.type('application/javascript').sendFile(resolve(rootDir, 'examples/scriptcat-downloader.user.js'));
+    });
+    this.app.use('/rss-bridge', async (req, res, next) => {
+      if (!this.cfg.rssBridgeEnabled) {
+        res.status(404).json({ code: 1, message: 'RSS 中转服务未启用，请在设置中开启' });
+        return;
+      }
+      const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+      const authToken = String(req.headers.authorization || queryToken);
+      if (!this.authorized(authToken)) {
+        res.status(401).json({ code: 1008, message: '请输入正确的访问密码' });
+        return;
+      }
+      try {
+        await this.rssBridge.handle(req, res, this.token ? queryToken : '');
+      } catch (error) {
+        next(error);
+      }
+    });
     this.app.use('/api', (req, res, next) => {
       const token = String(req.headers.authorization || (req.path === '/file' ? req.query.token || '' : ''));
       if (!this.authorized(token)) {
@@ -333,10 +414,63 @@ export class DLServer {
       if (!['custom', 'system', 'disabled'].includes(next.proxyMode)) throw new Error('无效的代理模式');
       formatHeaders(next.headers);
       if (next.proxyMode === 'custom' && !/^https?:\/\//.test(next.proxyUrl)) throw new Error('代理地址应以 http:// 或 https:// 开头');
+      if (typeof next.rssBridgeEnabled !== 'boolean') throw new Error('RSS 中转开关参数无效');
+      if ('rssBridgeFeeds' in req.body && req.body.rssBridgeFeeds !== undefined) {
+        const feeds = validateRssFeeds(req.body.rssBridgeFeeds);
+        next.rssBridgeFeeds = feeds;
+        const primary = feeds.find(feed => feed.id.toLowerCase() === 'default') || feeds[0];
+        if (primary) {
+          next.rssBridgeFeedUrl = primary.url;
+          next.rssBridgeLimit = primary.limit;
+          next.rssBridgeReferer = primary.referer || '';
+          next.rssBridgeCacheTtl = primary.cacheTtl;
+        }
+      } else {
+        if (!Number.isInteger(next.rssBridgeLimit) || next.rssBridgeLimit < 1 || next.rssBridgeLimit > 50)
+          throw new Error('RSS 条目上限应为 1–50');
+        if (!Number.isInteger(next.rssBridgeCacheTtl) || next.rssBridgeCacheTtl < 0 || next.rssBridgeCacheTtl > 86400)
+          throw new Error('RSS 缓存时长应为 0–86400 秒');
+        next.rssBridgeFeedUrl = validateHttpHref(next.rssBridgeFeedUrl, '上游 RSS 地址', Boolean(next.rssBridgeEnabled));
+        next.rssBridgeReferer = validateHttpHref(next.rssBridgeReferer, 'RSS Referer', false);
+        const existingFeeds = defaultRssBridgeFeeds(next);
+        const targetIndex = existingFeeds.findIndex(feed => feed.id.toLowerCase() === 'default');
+        if (targetIndex >= 0) {
+          existingFeeds[targetIndex] = {
+            ...existingFeeds[targetIndex],
+            enabled: true,
+            url: next.rssBridgeFeedUrl || existingFeeds[targetIndex].url,
+            limit: next.rssBridgeLimit,
+            referer: next.rssBridgeReferer,
+            cacheTtl: next.rssBridgeCacheTtl,
+          };
+        } else if (existingFeeds.length) {
+          existingFeeds[0] = {
+            ...existingFeeds[0],
+            url: next.rssBridgeFeedUrl || existingFeeds[0].url,
+            limit: next.rssBridgeLimit,
+            referer: next.rssBridgeReferer,
+            cacheTtl: next.rssBridgeCacheTtl,
+          };
+        } else if (next.rssBridgeFeedUrl) {
+          existingFeeds.push({
+            id: 'default',
+            name: '默认订阅源',
+            enabled: true,
+            mode: 'rss',
+            url: next.rssBridgeFeedUrl,
+            itemPattern: '',
+            referer: next.rssBridgeReferer,
+            limit: next.rssBridgeLimit,
+            cacheTtl: next.rssBridgeCacheTtl,
+          });
+        }
+        next.rssBridgeFeeds = existingFeeds;
+      }
       await initProxy(next);
       await fs.mkdir(dirname(this.configPath), { recursive: true });
       await fs.writeFile(this.configPath, JSON.stringify(next, null, 2));
       this.cfg = next;
+      this.rssBridge.invalidateCache();
       this.startNext();
       res.json({ code: 0, message: '设置已保存' });
     });
@@ -400,7 +534,7 @@ export class DLServer {
       let added = 0;
       for (const { url, ...options } of list) {
         if (this.tasks.get(url)?.status === 'pending') continue;
-        if (await this.enqueue(url, { ...options, sourceUrl: undefined, headerSourceUrl: undefined })) added++;
+        if (await this.enqueue(url, options)) added++;
       }
       res.json({ code: 0, message: `已加入 ${added} 个下载任务`, data: { added, skipped: list.length - added } });
     });
@@ -476,6 +610,7 @@ export class DLServer {
   }
   async close() {
     this.closing = true;
+    this.rssBridge.close();
     for (const controller of this.extractions) controller.abort();
     for (const run of this.runs.values()) run.controller.abort();
     await Promise.allSettled([...this.runs.values()].map(run => run.completion));

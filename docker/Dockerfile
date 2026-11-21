@@ -18,6 +18,7 @@ COPY --from=builder /app/cjs ./cjs
 COPY --from=builder /app/client/index.html ./client/index.html
 COPY --from=builder /app/client/assets ./client/assets
 COPY --from=builder /app/bin ./bin
+COPY --from=builder /app/examples/scriptcat-downloader.user.js ./examples/scriptcat-downloader.user.js
 VOLUME ["/app/downloads", "/app/cache"]
 EXPOSE 6600
 ENTRYPOINT ["tini", "-g", "--"]

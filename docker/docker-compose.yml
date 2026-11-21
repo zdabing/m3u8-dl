@@ -12,4 +12,5 @@ services:
       - ./cache:/app/cache
     environment:
       DS_SECRET: "${DS_SECRET:-}" # 猫抓接收需要设置访问密码
+      DS_RSS_BRIDGE_ENABLED: "${DS_RSS_BRIDGE_ENABLED:-false}" # 设为 true 默认启用内置 RSS 中转，也可在页面设置中随时开关
     restart: unless-stopped

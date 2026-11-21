@@ -42,18 +42,21 @@ test('auto detection uses pathname and preserves file extensions and forced HLS'
   await assert.rejects(formatOptions('https://example.com/video.mp4', { type: 'bad' }), /下载类型/);
 });
 
-test('MP4 and VTT direct files preserve exact bytes, names and request headers', async t => {
+test('MP4, audio and VTT direct files preserve exact bytes, names and request headers', async t => {
   const dir = await temporary(t);
   const video = Buffer.concat([Buffer.from('0000ftypisom'), Buffer.alloc(200000, 71)]);
   const subtitle = Buffer.from('WEBVTT\n\n00:00.000 --> 00:01.000\n你好，世界\n');
+  const audio = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(12000, 42)]);
+  const samples = new Map([['video.mp4', video], ['zh.vtt', subtitle], ['song.mp3', audio], ['song.opus', audio], ['song.weba', audio]]);
   const records = [];
   const origin = await serve(t, (req, res) => {
     records.push(req.headers);
     assert.equal(req.headers.referer, 'https://source.example/watch');
-    res.setHeader('content-type', req.url.startsWith('/zh') ? 'text/vtt' : 'video/mp4');
-    res.end(req.url.startsWith('/zh') ? subtitle : video);
+    const name = new URL(req.url, 'http://localhost').pathname.slice(1);
+    res.setHeader('content-type', name === 'zh.vtt' ? 'text/vtt' : name === 'video.mp4' ? 'video/mp4' : 'application/octet-stream');
+    res.end(samples.get(name));
   });
-  for (const [name, content] of [['video.mp4', video], ['zh.vtt', subtitle]]) {
+  for (const [name, content] of samples) {
     const result = await downloadResource(`${origin}/${name}?token=abc`, options(dir, { headers: { Referer: 'https://source.example/watch' } }));
     assert.equal(result.errmsg, undefined);
     assert.equal(path.basename(result.filepath), name);
@@ -61,7 +64,7 @@ test('MP4 and VTT direct files preserve exact bytes, names and request headers',
     assert.deepEqual(await fs.readFile(result.filepath), content);
   }
   const existing = await downloadResource(`${origin}/video.mp4?token=abc`, options(dir));
-  assert.equal(existing.isExist, true); assert.equal(records.length, 2);
+  assert.equal(existing.isExist, true); assert.equal(records.length, samples.size);
   assert.deepEqual(await fs.readdir(path.join(dir, 'cache')), []);
 });
 

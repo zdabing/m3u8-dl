@@ -7,6 +7,17 @@ const os = require('node:os');
 const path = require('node:path');
 const { DLServer } = require('../cjs/server/download-server.js');
 const { m3u8Download } = require('../cjs/lib/m3u8-download.js');
+const { catCatchTasks } = require('../cjs/server/cat-catch.js');
+
+test('media receiver maps extensionless audio MIME types to direct files without adding video suffixes', () => {
+  for (const [mime, ext] of [['audio/mpeg', 'mp3'], ['audio/mp4', 'm4a'], ['audio/x-wav', 'wav'], ['audio/opus', 'opus'], ['audio/webm', 'weba']]) {
+    const [task] = catCatchTasks({ action: 'catch', data: { url: 'https://cdn.example/object?token=abc', type: mime, title: '歌曲' } });
+    assert.equal(task.type, 'file');
+    assert.equal(task.filename, `歌曲.${ext}`);
+  }
+  const [opus] = catCatchTasks({ action: 'catch', data: { url: 'https://cdn.example/song.opus', type: 'audio/ogg', name: '歌曲.opus' } });
+  assert.equal(opus.filename, '歌曲.opus');
+});
 
 async function temporary(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cat-catch-test-'));
@@ -36,6 +47,10 @@ test('Cat-Catch accepts authenticated single and batch sends, and uses only capt
   server = new DLServer({ port: 0, cacheDir: path.join(dir, 'cache'), token: 'fixture-secret' });
   await server.ready;
   const api = `http://127.0.0.1:${server.server.address().port}/api/`;
+  const script = await fetch(new URL('/scriptcat.user.js', api));
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get('content-type'), /javascript/);
+  assert.match(await script.text(), /@grant\s+GM_cookie/);
   const call = (endpoint, data, token = 'fixture-secret') => fetch(api + endpoint, {
     method: data === undefined ? 'GET' : 'POST',
     headers: { authorization: token, 'content-type': 'application/json' },
@@ -46,16 +61,18 @@ test('Cat-Catch accepts authenticated single and batch sends, and uses only capt
     url: source + '/video.mp4', fullFileName: 'sample.mp4', ext: 'mp4',
     cookie: 'media-session="quoted value"', origin: 'https://player.example', referer: 'https://player.example/watch',
     userAgent: 'CatCatch fixture',
+    sourceUrl: 'https://player.example/detail/123',
   };
   assert.equal((await call('cat-catch', { action: 'catch', data: video }, '')).status, 401);
   assert.equal((await call('cat-catch', { action: 'addKey', data: 'not a resource' })).status, 400);
   assert.equal((await call('cat-catch', { action: 'catch', data: [video, { url: 'file:///invalid' }] })).status, 400);
   assert.equal((await call('cat-catch', { action: 'catch', data: { ...video, cookie: 'bad\r\nvalue' } })).status, 400);
+  assert.equal((await call('cat-catch', { action: 'catch', data: { ...video, sourceUrl: 'javascript:alert(1)' } })).status, 400);
   assert.deepEqual((await (await call('tasks')).json()).data, {});
   assert.deepEqual((await (await call('cat-catch', { action: 'catch', data: video, tabId: '3' })).json()).data, { added: 1, skipped: 0 });
   const subtitles = [
     { url: source + '/track?id=1', type: 'text/vtt', requestHeaders: [{ name: 'Referer', value: 'https://player.example/watch' }] },
-    { url: source + '/track?id=2', name: 'sample.zh.vtt', requestHeaders: { Cookie: 'subtitle-cookie' } },
+    { url: source + '/track?id=2', name: 'sample.zh.vtt', requestHeaders: { Cookie: 'subtitle-cookie', Referer: '' } },
   ];
   assert.deepEqual((await (await call('cat-catch', { action: 'catch', data: subtitles })).json()).data, { added: 2, skipped: 0 });
   let tasks;
@@ -72,10 +89,13 @@ test('Cat-Catch accepts authenticated single and batch sends, and uses only capt
   assert.equal(received.get('/video.mp4').referer, video.referer);
   assert.equal(received.get('/video.mp4')['user-agent'], video.userAgent);
   assert.equal(received.get('/video.mp4').authorization, undefined);
+  assert.equal(tasks.find(task => task.url === video.url).options.sourceUrl, video.sourceUrl);
+  assert.equal(tasks.find(task => task.url === video.url).options.headerSourceUrl, video.url);
   assert.equal(received.get('/track?id=1').cookie, undefined);
   assert.equal(received.get('/track?id=1').origin, undefined);
   assert.equal(received.get('/track?id=1').referer, video.referer);
   assert.equal(received.get('/track?id=2').cookie, 'subtitle-cookie');
+  assert.equal(received.get('/track?id=2').referer, undefined);
   assert.deepEqual((await (await call('cat-catch', { action: 'catch', data: video })).json()).data, { added: 0, skipped: 1 });
 });
 
