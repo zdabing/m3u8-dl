@@ -128,6 +128,39 @@ watch(
   }
 );
 
+function readSavedToken() {
+  try {
+    return localStorage.getItem('m3u8-token') || sessionStorage.getItem('m3u8-token') || localStorage.getItem('token') || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveToken(value: string, persist: boolean) {
+  try {
+    if (persist) {
+      localStorage.setItem('m3u8-token', value);
+      sessionStorage.removeItem('m3u8-token');
+    } else {
+      sessionStorage.setItem('m3u8-token', value);
+      localStorage.removeItem('m3u8-token');
+    }
+    localStorage.removeItem('token');
+  } catch {
+    /* Ignore storage errors. */
+  }
+}
+
+function clearSavedToken() {
+  try {
+    localStorage.removeItem('m3u8-token');
+    localStorage.removeItem('token');
+    sessionStorage.removeItem('m3u8-token');
+  } catch {
+    /* Ignore storage errors. */
+  }
+}
+
 const loginOpen = ref(false);
 const editTask = ref<TaskItem | null>(null);
 const editHeaders = ref('');
@@ -135,7 +168,8 @@ const removeTasks = ref<TaskItem[]>([]);
 const removeFile = ref(false);
 const removeCache = ref(true);
 const password = ref('');
-const token = ref(sessionStorage.getItem('m3u8-token') || localStorage.getItem('token') || '');
+const rememberLogin = ref(true);
+const token = ref(readSavedToken());
 const inputRef = ref<HTMLTextAreaElement>();
 const modalRef = ref<HTMLDialogElement>();
 const config = reactive<ServerConfig>({
@@ -151,7 +185,7 @@ const config = reactive<ServerConfig>({
   noProxy: '',
   rssBridgeEnabled: false,
   rssBridgeFeedUrl: 'https://tangxinvlog.app/rss.xml',
-  rssBridgeLimit: 20,
+  rssBridgeLimit: 0,
   rssBridgeReferer: '',
   rssBridgeCacheTtl: 300,
   rssBridgeFeeds: [
@@ -163,7 +197,7 @@ const config = reactive<ServerConfig>({
       url: 'https://tangxinvlog.app/rss.xml',
       itemPattern: '',
       referer: '',
-      limit: 20,
+      limit: 0,
       cacheTtl: 300,
     },
   ],
@@ -201,7 +235,7 @@ function addRssFeed() {
     url: '',
     itemPattern: '',
     referer: '',
-    limit: 20,
+    limit: 0,
     cacheTtl: 300,
   });
 }
@@ -322,8 +356,12 @@ async function api<T = unknown>(path: string, body?: unknown, signal?: AbortSign
   });
   const result = (await response.json()) as ApiResponse<T>;
   if (response.status === 401) {
-    loginOpen.value = true;
-    await openModal();
+    if (!loginOpen.value) {
+      clearSavedToken();
+      token.value = '';
+      loginOpen.value = true;
+      await openModal();
+    }
   }
   if (!response.ok || result.code) throw new Error(result.message || '请求失败，请重试');
   return result.data as T;
@@ -373,8 +411,12 @@ function connect() {
     if (stopped || socket !== ws) return;
     connection.value = 'offline';
     if (event.code === 1008) {
-      loginOpen.value = true;
-      void openModal();
+      if (!loginOpen.value) {
+        clearSavedToken();
+        token.value = '';
+        loginOpen.value = true;
+        void openModal();
+      }
       return;
     }
     reconnectTimer = setTimeout(() => {
@@ -670,10 +712,17 @@ async function modalSubmit() {
   modalError.value = '';
   try {
     if (loginOpen.value) {
-      token.value = password.value.trim();
-      if (!token.value) throw new Error('请输入访问密码');
-      await api('tasks');
-      sessionStorage.setItem('m3u8-token', token.value);
+      const previous = token.value;
+      const candidate = password.value.trim();
+      if (!candidate) throw new Error('请输入访问密码');
+      token.value = candidate;
+      try {
+        await api('tasks');
+      } catch (error) {
+        token.value = previous;
+        throw error;
+      }
+      saveToken(candidate, rememberLogin.value);
       password.value = '';
       loginOpen.value = false;
       connect();
@@ -745,6 +794,17 @@ async function details(task: TaskItem) {
 function filterSegments(filter: 'all' | 'done' | 'error' | 'pending') {
   segmentFilter.value = filter;
   segmentPage.value = 1;
+}
+function logout() {
+  clearSavedToken();
+  token.value = '';
+  tasks.value = {};
+  socket?.close();
+  view.value = 'tasks';
+  closeModal();
+  loginOpen.value = true;
+  void openModal();
+  notify('已退出当前浏览器登录');
 }
 function fileUrl(task: TaskItem) {
   return `/api/file?url=${encodeURIComponent(task.url)}&token=${encodeURIComponent(token.value)}`;
@@ -831,7 +891,7 @@ onBeforeUnmount(() => {
     </nav>
 
     <main id="main-content" class="workspace" tabindex="-1">
-      <div v-if="connection === 'offline'" class="offline-banner" role="status">
+      <div v-if="connection === 'offline' && !loginOpen" class="offline-banner" role="status">
         <AppIcon name="info" :size="16" />
         <span>服务连接已断开，正在自动重连。</span>
         <button type="button" @click="connect(); load()">重新连接</button>
@@ -1158,7 +1218,6 @@ onBeforeUnmount(() => {
                           <input v-model="feed.enabled" type="checkbox" />
                           <span>启用</span>
                         </label>
-                        <button type="button" class="toolbar-button" :disabled="!validFeedId(feed.id)" @click="copyFeedUrl(feed)"><AppIcon name="copy" :size="14" /><span>复制链接</span></button>
                         <button type="button" class="icon-button remove-button" :aria-label="`移除订阅源 ${feed.name || feed.id}`" title="移除订阅源" @click="removeRssFeed(index)"><AppIcon name="trash" :size="16" /></button>
                       </div>
                     </div>
@@ -1171,7 +1230,7 @@ onBeforeUnmount(() => {
                     <div class="form-grid">
                       <div>
                         <label :for="`feed-id-${index}`">源标识 ID <span class="field-note">字母/数字/-/_</span></label>
-                        <input :id="`feed-id-${index}`" v-model="feed.id" class="mono" pattern="[a-zA-Z0-9_-]{1,40}" maxlength="40" placeholder="例如 tangxin" required />
+                        <input :id="`feed-id-${index}`" v-model="feed.id" class="mono" pattern="[a-zA-Z0-9_\-]{1,40}" maxlength="40" placeholder="例如 tangxin" required />
                       </div>
                       <div>
                         <label :for="`feed-name-${index}`">显示名称</label>
@@ -1206,8 +1265,8 @@ onBeforeUnmount(() => {
 
                     <div class="form-grid">
                       <div>
-                        <label :for="`feed-limit-${index}`">保留条数 (1–50)</label>
-                        <input :id="`feed-limit-${index}`" v-model.number="feed.limit" type="number" min="1" max="50" required />
+                        <label :for="`feed-limit-${index}`">保留条数 <span class="field-note">0 = 全部（不限制）</span></label>
+                        <input :id="`feed-limit-${index}`" v-model.number="feed.limit" type="number" min="0" max="50000" placeholder="0 表示全部" required />
                       </div>
                       <div>
                         <label :for="`feed-ttl-${index}`">缓存时长（秒）</label>
@@ -1274,6 +1333,17 @@ onBeforeUnmount(() => {
               </div>
 
               <p class="zen-pref-note">外观与主题偏好自动保存于当前浏览器，即时生效，无需提交服务端。</p>
+
+              <div v-if="token" class="zen-nested-box zen-session-box">
+                <div class="zen-nested-copy">
+                  <strong>当前浏览器登录状态</strong>
+                  <p>退出后会清除此浏览器保存的访问密码，并要求重新验证。</p>
+                </div>
+                <button type="button" class="button secondary" @click="logout">
+                  <AppIcon name="logout" :size="15" />
+                  <span>退出登录</span>
+                </button>
+              </div>
             </section>
           </div>
 
@@ -1289,6 +1359,47 @@ onBeforeUnmount(() => {
       </template>
     </main>
 
+    <nav class="zen-mobile-tabbar" aria-label="移动端导航">
+      <button
+        type="button"
+        class="zen-mobile-tab"
+        :aria-current="view === 'tasks' && !newDownloadOpen ? 'page' : undefined"
+        @click="closeModal(); view = 'tasks'"
+      >
+        <AppIcon name="layers" :size="20" />
+        <span>任务</span>
+        <span v-if="active.length" class="zen-mobile-badge">{{ active.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="zen-mobile-tab primary-action"
+        :aria-current="newDownloadOpen && entryMode === 'download' ? 'page' : undefined"
+        @click="newDownload('download')"
+      >
+        <AppIcon name="plus" :size="20" />
+        <span>新建</span>
+      </button>
+      <button
+        type="button"
+        class="zen-mobile-tab"
+        :aria-current="newDownloadOpen && entryMode === 'extract' ? 'page' : undefined"
+        @click="newDownload('extract')"
+      >
+        <AppIcon name="link" :size="20" />
+        <span>提取</span>
+      </button>
+      <button
+        type="button"
+        class="zen-mobile-tab"
+        :aria-current="view === 'settings' && !newDownloadOpen ? 'page' : undefined"
+        @click="closeModal(); openSettings()"
+      >
+        <AppIcon name="settings" :size="20" />
+        <span>设置</span>
+        <i v-if="config.rssBridgeEnabled" class="zen-mobile-dot" title="RSS 中转服务已开启" />
+      </button>
+    </nav>
+
     <div v-if="notice" class="toast" :class="{ error: noticeError }" role="status">
       <AppIcon :name="noticeError ? 'info' : 'check'" :size="18" />
       <span>{{ notice }}</span>
@@ -1298,7 +1409,7 @@ onBeforeUnmount(() => {
     <dialog
       ref="modalRef"
       class="dialog"
-      :class="{ 'zen-drawer': !!detailsUrl, 'zen-dialog': !detailsUrl, 'entry-dialog': newDownloadOpen, 'removal-dialog': removeTasks.length }"
+      :class="{ 'zen-drawer': !!detailsUrl, 'zen-dialog': !detailsUrl, 'login-dialog': loginOpen, 'entry-dialog': newDownloadOpen, 'removal-dialog': removeTasks.length }"
       :aria-label="loginOpen ? '服务访问密码' : newDownloadOpen ? entryTitle : detailsUrl ? '下载详情' : editTask ? '修改请求头' : '移除任务'"
       @cancel.prevent="closeModal"
       @keydown.esc.prevent="closeModal"
@@ -1320,9 +1431,13 @@ onBeforeUnmount(() => {
 
         <div class="dialog-body">
           <template v-if="loginOpen">
-            <p class="dialog-intro">服务已启用密码保护。密码仅在当前浏览器会话中保存。</p>
+            <p class="dialog-intro">服务已启用密码保护。勾选下方选项后，同一浏览器下次打开无需重复输入。</p>
             <label for="password">访问密码</label>
             <input id="password" v-model="password" type="password" autocomplete="current-password" required autofocus />
+            <label class="check-field">
+              <input v-model="rememberLogin" type="checkbox" />
+              <span>在此浏览器记住登录状态<small>取消勾选则仅在当前标签页会话有效。</small></span>
+            </label>
           </template>
 
           <template v-else-if="newDownloadOpen">

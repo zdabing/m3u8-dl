@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8 下载器 · 发送到 Docker
 // @namespace    m3u8-dl
-// @version      1.0.2
-// @description  识别播放页媒体与字幕，手动发送链接、名称、来源和媒体域请求信息
+// @version      1.1.0
+// @description  识别播放页媒体与字幕，手动发送链接、名称、来源和媒体域请求信息（支持手机端底部抽屉）
 // @match        http://*/*
 // @match        https://*/*
 // @run-at       document-start
@@ -252,25 +252,71 @@
 
   function mount() {
     const host = document.createElement('div');
-    host.style.cssText = 'position:fixed;right:12px;bottom:16px;z-index:2147483647;color-scheme:light;';
+    host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;color-scheme:light;';
     const root = host.attachShadow({ mode: 'closed' });
     root.innerHTML = `<style>
-      :host{all:initial;font:14px/1.5 system-ui,sans-serif;color:#24334b}*{box-sizing:border-box}
-      button,input{font:inherit}button{cursor:pointer;background:#edf4ff;color:#1760d5;border:1px solid #d6e4fa;border-radius:8px;padding:9px 12px;min-height:40px}
-      button:disabled{opacity:.5;cursor:wait}input[type=text],input[type=password],input[type=url]{width:100%;min-height:42px;border:1px solid #d6dfed;border-radius:7px;padding:8px;color:#24334b;background:white}
-      input[type=checkbox]{width:18px;height:18px;flex-shrink:0;accent-color:#1760d5}label{display:block;margin-top:10px}h2{font-size:18px;margin:0}
-      section{width:min(440px,calc(100vw - 24px));max-height:calc(100dvh - 96px);overflow:auto;background:white;border:1px solid #dce5f2;border-radius:14px;box-shadow:0 8px 40px #18345426;padding:16px;margin-bottom:8px}
-      section[hidden]{display:none}header,footer{display:flex;align-items:center;justify-content:space-between;gap:8px}small{display:block;color:#69788e;margin:6px 0;overflow-wrap:anywhere}
-      #list{margin:12px 0;max-height:36vh;overflow:auto}.resource{display:flex;align-items:flex-start;gap:8px;padding:10px 0;border-top:1px solid #edf1f7;margin:0}.resource span{min-width:0;overflow-wrap:anywhere}.resource small{font-size:12px;margin:2px 0}
-      .primary{background:#1760d5;color:white;border-color:#1760d5}#status{white-space:pre-wrap;overflow-wrap:anywhere}#toggle{float:right}summary{cursor:pointer;padding:10px 0}
-    </style><section hidden aria-label="发送媒体到 Docker"><header><h2>发送到下载器</h2><button id="close" aria-label="关闭">关闭</button></header>
-      <details id="settings"><summary>连接设置</summary><label>Docker 下载器地址<input id="server" type="url" placeholder="http://192.168.1.10:6600" /></label>
-      <label>访问密码（DS_SECRET）<input id="secret" type="password" autocomplete="off" /></label><button id="save">保存连接设置</button></details>
-      <label>下载名称<input id="title" type="text" /></label><label>详情页地址<input id="source" type="url" /></label>
-      <label><input id="cookies" type="checkbox" checked /> 附带媒体域 Cookie（首次需脚本猫授权）</label>
-      <small>名称和详情页可修改；Cookie 只在点击发送时读取。Referer / Origin 根据播放页请求推导，不等于浏览器网络抓包。</small>
-      <details><summary>手动添加媒体地址</summary><label>M3U8 / 视频 / 音频 / 字幕直链<input id="manual-url" type="url" placeholder="https://…" /></label><button id="manual-add">添加到列表</button><small>无后缀且无法识别的地址按 M3U8 添加。请求来源默认使用当前播放页。</small></details>
-      <div id="list"></div><footer><button id="all">全选 / 取消</button><button id="refresh">重新扫描</button><button id="send" class="primary">发送所选</button></footer><small id="status" role="status"></small>
+      :host{all:initial;font:14px/1.5 system-ui,-apple-system,sans-serif;color:#24334b;pointer-events:none}*{box-sizing:border-box}
+      button,input{font:inherit;-webkit-tap-highlight-color:transparent}
+      button{cursor:pointer;background:#edf4ff;color:#1760d5;border:1px solid #d6e4fa;border-radius:10px;padding:8px 12px;min-height:38px;font-weight:500;touch-action:manipulation}
+      button:disabled{opacity:.5;cursor:wait}
+      input[type=text],input[type=password],input[type=url]{width:100%;min-height:42px;border:1px solid #d6dfed;border-radius:9px;padding:8px 10px;color:#24334b;background:#fff;font-size:15px}
+      input[type=checkbox]{width:19px;height:19px;flex-shrink:0;accent-color:#1760d5;margin:2px 0 0}
+      label{display:block;margin-top:10px;font-size:13px;color:#475569;font-weight:500}
+      label input{margin-top:4px;font-weight:400}
+      label.check{display:flex;align-items:flex-start;gap:8px;margin-top:12px;color:#24334b;font-weight:400;cursor:pointer}
+      label.check input{margin-top:2px}
+      h2{font-size:16px;font-weight:600;margin:0}
+      #backdrop{position:fixed;inset:0;background:rgba(15,23,42,.42);pointer-events:auto;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+      #backdrop[hidden]{display:none}
+      section{pointer-events:auto;position:fixed;right:16px;bottom:76px;width:min(440px,calc(100vw - 32px));max-height:min(700px,calc(100dvh - 104px));display:flex;flex-direction:column;overflow:hidden;background:#fff;border:1px solid #dce5f2;border-radius:16px;box-shadow:0 12px 44px rgba(15,23,42,.22)}
+      section[hidden]{display:none}
+      header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px 16px;border-bottom:1px solid #edf1f7;flex-shrink:0}
+      .body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 16px 16px}
+      footer{display:flex;flex-direction:column;gap:8px;padding:12px 16px max(12px,env(safe-area-inset-bottom));border-top:1px solid #edf1f7;background:#f8fafc;flex-shrink:0}
+      small{display:block;color:#64748b;margin:4px 0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+      details{border:1px solid #e6ecf5;border-radius:12px;padding:0 12px;background:#f8fafc;margin-bottom:10px}
+      summary{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:10px 0;font-size:13px;font-weight:600;color:#334155;list-style:none}
+      summary::-webkit-details-marker{display:none}
+      summary::after{content:'展开';font-size:12px;font-weight:500;color:#64748b}
+      details[open]>summary::after{content:'收起'}
+      details .box{padding-bottom:12px;border-top:1px solid #e6ecf5}
+      details .box button{margin-top:10px;width:100%}
+      .manual-box{margin-top:10px;background:#fff}
+      .compact{margin-top:2px}
+      .list-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px}
+      #count-label{font-size:13px;font-weight:600;color:#334155}
+      .list-tools{display:flex;gap:6px}
+      .list-tools button{min-height:34px;padding:5px 10px;font-size:12px}
+      #list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;color:#64748b;font-size:13px;line-height:1.6}
+      .resource{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;margin:0;border:1px solid #e3eaf5;border-radius:11px;background:#fff;cursor:pointer;font-weight:400;color:#24334b}
+      .resource:has(input:checked){background:#f0f6ff;border-color:#1760d5}
+      .resource span{min-width:0;flex:1;font-weight:600;font-size:13px;overflow-wrap:anywhere}
+      .resource small{font-size:12px;font-weight:400;margin:3px 0 0;color:#64748b}
+      .primary{background:#1760d5;color:#fff;border-color:#1760d5;width:100%;min-height:46px;font-size:15px;font-weight:600}
+      #status{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;min-height:0}
+      #status:empty{display:none}
+      #toggle{pointer-events:auto;position:fixed;right:12px;bottom:max(76px,calc(16px + env(safe-area-inset-bottom)));border-radius:999px;padding:10px 14px;background:#fff;color:#1760d5;border:1px solid #d6e4fa;box-shadow:0 4px 16px rgba(15,23,42,.14);font-weight:600;touch-action:none;user-select:none}
+      #toggle.has-media{background:#1760d5;color:#fff;border-color:#1760d5;box-shadow:0 6px 20px rgba(23,96,213,.32)}
+      #toggle[hidden]{display:none}
+      @media (max-width:640px){
+        input[type=text],input[type=password],input[type=url]{font-size:16px}
+        section{left:0;right:0;bottom:0;width:100%;max-width:100%;max-height:88dvh;border-radius:20px 20px 0 0;border-bottom:0;border-inline:0}
+        header{position:relative;padding:20px 16px 12px}
+        header::before{content:'';position:absolute;top:8px;left:calc(50% - 18px);width:36px;height:4px;border-radius:4px;background:#cbd5e1}
+      }
+    </style><div id="backdrop" hidden></div><section hidden aria-label="发送媒体到 Docker"><header><h2>发送到下载器</h2><button id="close" aria-label="关闭">关闭</button></header>
+      <div class="body">
+        <details id="settings"><summary>连接设置</summary><div class="box"><label>Docker 下载器地址<input id="server" type="url" placeholder="http://192.168.1.10:6600" /></label>
+        <label>访问密码（DS_SECRET）<input id="secret" type="password" autocomplete="off" /></label><button id="save">保存连接设置</button></div></details>
+        <label class="compact">下载名称<input id="title" type="text" /></label>
+        <div class="list-bar"><span id="count-label">检测到 0 个媒体</span><div class="list-tools"><button id="all">全选 / 取消</button><button id="refresh">重新扫描</button></div></div>
+        <div id="list"></div>
+        <details id="advanced"><summary>更多选项（详情页 · Cookie · 手动添加）</summary><div class="box"><label>详情页地址<input id="source" type="url" /></label>
+        <label class="check"><input id="cookies" type="checkbox" checked /><span>附带媒体域 Cookie（首次需脚本猫授权）</span></label>
+        <small>名称和详情页可修改；Cookie 只在点击发送时读取。Referer / Origin 根据播放页请求推导，不等于浏览器网络抓包。</small>
+        <details class="manual-box"><summary>手动添加媒体地址</summary><div class="box"><label>M3U8 / 视频 / 音频 / 字幕直链<input id="manual-url" type="url" placeholder="https://…" /></label><button id="manual-add">添加到列表</button><small>无后缀且无法识别的地址按 M3U8 添加。请求来源默认使用当前播放页。</small></div></details></div></details>
+      </div>
+      <footer><small id="status" role="status"></small><button id="send" class="primary">发送所选</button></footer>
       </section><button id="toggle">下载 · 0</button>`;
     document.documentElement.append(host);
     const $ = id => root.getElementById(id);
@@ -278,13 +324,69 @@
     const selected = new Set();
     let busy = false;
     let wasOpen = false;
+    let dragged = false;
     const status = text => { $('status').textContent = text; };
     const settings = GM_getValue('docker-settings', {});
     $('server').value = settings.server || '';
     $('secret').value = settings.secret || '';
     $('settings').open = !settings.server;
+    const toggleBtn = $('toggle');
+    try {
+      if (settings.server && typeof location !== 'undefined' && new URL(settings.server).origin === location.origin) {
+        toggleBtn.hidden = true;
+      }
+    } catch { /* Ignore invalid saved server URL. */ }
+    const clampBottom = value => {
+      const max = typeof window.innerHeight === 'number' && window.innerHeight > 120 ? window.innerHeight - 64 : 600;
+      return Math.max(16, Math.min(max, Math.round(value)));
+    };
+    const savedBottom = GM_getValue('docker-btn-bottom', null);
+    if (typeof savedBottom === 'number' && Number.isFinite(savedBottom)) {
+      toggleBtn.style.bottom = `${clampBottom(savedBottom)}px`;
+    }
+    if (typeof toggleBtn.addEventListener === 'function') {
+      let startY = 0;
+      let startBottom = 76;
+      let pointerId = null;
+      const currentBottom = () => {
+        const inline = Number.parseFloat(toggleBtn.style.bottom);
+        if (Number.isFinite(inline)) return inline;
+        if (typeof toggleBtn.getBoundingClientRect === 'function' && typeof window.innerHeight === 'number') {
+          return window.innerHeight - toggleBtn.getBoundingClientRect().bottom;
+        }
+        return 76;
+      };
+      toggleBtn.addEventListener('pointerdown', e => {
+        if (e.button && e.button !== 0) return;
+        pointerId = e.pointerId;
+        startY = e.clientY;
+        startBottom = currentBottom();
+        dragged = false;
+        try { toggleBtn.setPointerCapture?.(e.pointerId); } catch { /* Ignore unsupported pointer capture. */ }
+      });
+      toggleBtn.addEventListener('pointermove', e => {
+        if (pointerId !== e.pointerId) return;
+        const dy = startY - e.clientY;
+        if (!dragged && Math.abs(dy) < 8) return;
+        dragged = true;
+        toggleBtn.style.bottom = `${clampBottom(startBottom + dy)}px`;
+      });
+      const finishDrag = e => {
+        if (pointerId !== e.pointerId) return;
+        pointerId = null;
+        if (dragged) GM_setValue('docker-btn-bottom', currentBottom());
+      };
+      toggleBtn.addEventListener('pointerup', finishDrag);
+      toggleBtn.addEventListener('pointercancel', finishDrag);
+    }
+    const syncBackdrop = () => { if ($('backdrop')) $('backdrop').hidden = panel.hidden; };
+    const closePanel = () => {
+      panel.hidden = true;
+      syncBackdrop();
+    };
     function open() {
       panel.hidden = !panel.hidden;
+      syncBackdrop();
       if (!panel.hidden && !wasOpen) {
         $('title').value = document.title;
         $('source').value = location.href;
@@ -293,18 +395,29 @@
       scan();
       render();
     }
-    $('toggle').onclick = open;
-    $('close').onclick = () => { panel.hidden = true; };
+    toggleBtn.onclick = () => {
+      if (dragged) { dragged = false; return; }
+      open();
+    };
+    $('close').onclick = closePanel;
+    if ($('backdrop')) $('backdrop').onclick = closePanel;
     GM_registerMenuCommand('打开媒体发送面板', () => { if (panel.hidden) open(); });
     $('save').onclick = () => {
       const server = httpUrl($('server').value.trim());
       if (!server || !$('secret').value.trim()) { status('请填写有效的下载器地址及 DS_SECRET。'); return; }
-      GM_setValue('docker-settings', { server: server.replace(/\/$/, ''), secret: $('secret').value.trim() });
+      const cleanServer = server.replace(/\/$/, '');
+      GM_setValue('docker-settings', { server: cleanServer, secret: $('secret').value.trim() });
+      try {
+        toggleBtn.hidden = typeof location !== 'undefined' && new URL(cleanServer).origin === location.origin;
+      } catch { /* Ignore */ }
       status('连接设置已保存在脚本猫中。');
       $('settings').open = false;
     };
     render = () => {
-      $('toggle').textContent = `下载 · ${resources.size}`;
+      const count = resources.size;
+      toggleBtn.textContent = `下载 · ${count}`;
+      if (toggleBtn.classList) toggleBtn.classList.toggle('has-media', count > 0);
+      if ($('count-label')) $('count-label').textContent = `检测到 ${count} 个媒体`;
       if (panel.hidden) return;
       const list = $('list');
       list.replaceChildren();

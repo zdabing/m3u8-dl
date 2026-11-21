@@ -267,6 +267,7 @@ p {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow-x: clip;
 }
 
 /* Colored Icon Badges (.apple-icon pattern) */
@@ -1349,14 +1350,14 @@ button:active:not(:disabled) {
 }
 
 .zen-empty {
-  min-height: 280px;
+  min-height: 200px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 10px;
   text-align: center;
-  padding: 40px 20px;
+  padding: 28px 20px;
 }
 
 .zen-empty h3 {
@@ -1701,6 +1702,14 @@ button:active:not(:disabled) {
   color: var(--text-muted);
 }
 
+.zen-session-box {
+  margin-top: 14px;
+}
+
+.zen-mobile-tabbar {
+  display: none;
+}
+
 .zc-savebar {
   position: sticky;
   bottom: 14px;
@@ -1757,6 +1766,22 @@ select {
   line-height: 1.5;
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 36px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%237e838d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px 16px;
+}
+
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ba2b1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 input:not([type="checkbox"]):focus,
@@ -1900,6 +1925,9 @@ textarea {
 .dialog form {
   display: flex;
   flex-direction: column;
+}
+
+.zen-drawer form {
   height: 100%;
 }
 
@@ -2413,65 +2441,84 @@ textarea {
 
 @media (max-width: 768px) {
   .zen-header {
-    padding: 10px 16px;
-    min-height: 62px;
+    padding: 8px 14px;
+    padding-top: max(8px, env(safe-area-inset-top));
+    min-height: 54px;
+    gap: 10px;
   }
 
   :root[data-skin="meridian"] .zen-header {
     max-width: 100%;
     margin: 0;
     top: 0;
-    border-radius: 0 0 20px 20px;
+    border-radius: 0 0 18px 18px;
     border-top: 0;
     border-inline: 0;
   }
 
+  .header-left {
+    gap: 8px;
+  }
+
+  .brand {
+    gap: 8px;
+    font-size: 17px;
+  }
+
   .zen-status-pill {
-    display: none;
+    padding: 4px 8px;
+    font-size: 11px;
+    gap: 5px;
   }
 
-  .zen-mode-toggle,
-  .extract-button {
-    width: 40px;
-    height: 40px;
-    padding: 0;
+  .zen-mode-toggle {
+    min-height: 36px;
+    padding: 0 10px;
   }
 
-  .zen-mode-toggle span,
-  .extract-button span {
-    display: none;
-  }
-
-  .new-button {
-    min-height: 40px;
-    padding: 8px 12px;
-  }
-
+  .extract-button,
+  .new-button,
   .zc-app-nav {
-    padding: 10px 16px 2px;
-  }
-
-  .zc-nav-aside span {
     display: none;
-  }
-
-  .zc-nav-aside {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    justify-content: center;
   }
 
   .workspace {
-    padding: 12px 16px 28px;
+    padding: 12px 14px calc(84px + env(safe-area-inset-bottom));
+  }
+
+  .zen-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .zen-metric-card {
+    padding: 10px 12px;
+    gap: 4px;
+    border-radius: 14px;
+  }
+
+  .zen-metric-card strong {
+    font-size: 20px;
+  }
+
+  .zen-metric-sub,
+  .zen-metric-track {
+    display: none;
   }
 
   .zen-panel-head {
-    padding: 16px;
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  .zen-panel-title p {
+    display: none;
   }
 
   .zen-panel-controls {
     width: 100%;
+    gap: 10px;
   }
 
   .zen-segmented {
@@ -2492,12 +2539,14 @@ textarea {
   }
 
   .zen-toolbar {
-    padding: 10px 16px;
+    padding: 8px 14px;
+    min-height: 46px;
+    gap: 8px;
   }
 
   .zen-toolbar.has-selection {
     position: sticky;
-    top: 66px;
+    top: 54px;
     z-index: 8;
   }
 
@@ -2513,36 +2562,66 @@ textarea {
   }
 
   .toolbar-button {
-    min-height: 40px;
+    min-height: 36px;
+    padding: 6px 9px;
+  }
+
+  .zen-empty {
+    min-height: 170px;
+    padding: 24px 16px;
   }
 
   .zen-task-list {
-    padding: 12px;
+    padding: 10px;
   }
 
   .zen-task-card {
     grid-template-columns: minmax(0, 1fr);
-    padding: 14px;
-    gap: 12px;
+    padding: 12px 14px;
+    gap: 10px;
+  }
+
+  .task-main {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .zen-format-badge {
+    min-width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    font-size: 10px;
+  }
+
+  .file-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    font-size: 13.5px;
+    line-height: 1.4;
   }
 
   .task-tail {
     flex-wrap: wrap;
-    gap: 10px;
+    gap: 8px;
+    padding-top: 8px;
   }
 
   .task-actions {
     margin-left: auto;
+    gap: 6px;
+    flex-wrap: wrap;
   }
 
   .task-actions .icon-button {
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
     background: var(--bg-nested);
   }
 
   .zen-panel-foot {
-    padding: 12px 16px;
+    padding: 10px 14px;
   }
 
   .zen-settings-tabs {
@@ -2557,7 +2636,7 @@ textarea {
   }
 
   .zen-settings-card {
-    padding: 18px 16px;
+    padding: 16px 14px;
   }
 
   .zen-feed-card {
@@ -2571,9 +2650,10 @@ textarea {
   }
 
   .zc-savebar {
+    position: static;
+    box-shadow: none;
     flex-wrap: wrap;
-    bottom: 8px;
-    padding: 12px 16px;
+    padding: 12px 14px;
   }
 
   .zc-savebar .button {
@@ -2581,26 +2661,114 @@ textarea {
     min-height: 44px;
   }
 
+  .zen-mobile-tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 6px 8px max(6px, env(safe-area-inset-bottom));
+    background: var(--bg-panel);
+    border-top: 1px solid var(--line);
+  }
+
+  :root[data-skin="meridian"] .zen-mobile-tabbar {
+    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.08);
+  }
+
+  .zen-mobile-tab {
+    position: relative;
+    min-height: 48px;
+    padding: 4px 2px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 550;
+    color: var(--text-secondary);
+  }
+
+  .zen-mobile-tab[aria-current="page"] {
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    font-weight: 600;
+  }
+
+  .zen-mobile-tab.primary-action:not([aria-current="page"]) {
+    color: var(--accent-strong);
+  }
+
+  .zen-mobile-badge {
+    position: absolute;
+    top: 3px;
+    right: calc(50% - 22px);
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 99px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 10px;
+    font-weight: 650;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .zen-mobile-dot {
+    position: absolute;
+    top: 6px;
+    right: calc(50% - 14px);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+
   .zen-dialog,
   .zen-drawer {
     margin: auto 0 0;
     width: 100%;
     max-width: 100%;
-    height: auto;
-    max-height: 94dvh;
+    height: fit-content;
+    max-height: 90dvh;
     border-radius: 20px 20px 0 0;
     border-bottom: 0;
     border-inline: 0;
   }
 
+  .zen-dialog.login-dialog {
+    margin: auto;
+    width: min(420px, calc(100% - 28px));
+    height: fit-content;
+    max-height: calc(100dvh - 48px);
+    border-radius: 20px;
+    border: 1px solid var(--line);
+  }
+
   .zen-drawer form,
   .zen-dialog form {
-    max-height: 93dvh;
+    height: auto;
+    max-height: 90dvh;
+  }
+
+  .zen-dialog.login-dialog form {
+    max-height: calc(100dvh - 48px);
   }
 
   .dialog-header {
     padding: 20px 18px 16px;
     position: relative;
+  }
+
+  .zen-dialog.login-dialog .dialog-header {
+    padding: 18px 18px 14px;
   }
 
   .dialog-header::before {
@@ -2613,6 +2781,10 @@ textarea {
     border-radius: 4px;
     background: var(--line-strong);
     opacity: 0.45;
+  }
+
+  .zen-dialog.login-dialog .dialog-header::before {
+    display: none;
   }
 
   .dialog-body {
@@ -2646,23 +2818,21 @@ textarea {
 
   .toast {
     top: auto;
-    bottom: max(20px, env(safe-area-inset-bottom));
+    bottom: calc(74px + env(safe-area-inset-bottom));
+  }
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  @media (max-width: 768px) {
+    :root[data-skin="meridian"] .zen-mobile-tabbar {
+      background: var(--glass-fill);
+      -webkit-backdrop-filter: blur(20px);
+      backdrop-filter: blur(20px);
+    }
   }
 }
 
 @media (max-width: 540px) {
-  .zen-metrics {
-    gap: 10px;
-  }
-
-  .zen-metric-card {
-    padding: 13px 14px;
-  }
-
-  .zen-metric-card strong {
-    font-size: 22px;
-  }
-
   .zen-choice-grid.two,
   .zen-choice-grid.three {
     grid-template-columns: minmax(0, 1fr);
@@ -2678,26 +2848,30 @@ textarea {
   }
 }
 
-@media (max-width: 360px) {
+@media (max-width: 380px) {
   .zen-header {
     padding-inline: 12px;
   }
 
+  .zen-mode-toggle {
+    width: 38px;
+    padding: 0;
+  }
+
+  .zen-mode-toggle span {
+    display: none;
+  }
+
   .brand {
-    font-size: 17px;
+    font-size: 16px;
   }
 
   .brand strong span {
     display: none;
   }
 
-  .workspace,
-  .zc-app-nav {
+  .workspace {
     padding-inline: 12px;
-  }
-
-  .zen-metrics {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -2713,7 +2887,8 @@ textarea {
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  :root[data-skin="meridian"] .zen-header {
+  :root[data-skin="meridian"] .zen-header,
+  :root[data-skin="meridian"] .zen-mobile-tabbar {
     background: var(--bg-panel);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
@@ -2721,7 +2896,8 @@ textarea {
 }
 
 @media (forced-colors: active) {
-  :root[data-skin="meridian"] .zen-header {
+  :root[data-skin="meridian"] .zen-header,
+  :root[data-skin="meridian"] .zen-mobile-tabbar {
     background: Canvas;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
@@ -2729,7 +2905,8 @@ textarea {
   }
 
   .zen-choice-card[aria-pressed="true"],
-  .zc-nav-item[aria-current="page"] {
+  .zc-nav-item[aria-current="page"],
+  .zen-mobile-tab[aria-current="page"] {
     outline: 2px solid Highlight;
   }
 }

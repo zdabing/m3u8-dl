@@ -202,3 +202,35 @@ test('ScriptCat panel sends selected media only, reads target cookies on click a
   assert.equal(manual[0].url, 'https://cdn.example/manual?id=1&token=a%2Bb');
   assert.equal(manual[0].type, 'application/vnd.apple.mpegurl');
 });
+
+test('ScriptCat hides floating button on configured WebUI origin and restores saved vertical offset', () => {
+  class Element {
+    constructor() { this.children = []; this.style = {}; this.value = ''; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren() { this.children = []; }
+  }
+  const fields = new Map();
+  const panel = new Element();
+  panel.hidden = true;
+  const root = {
+    getElementById(id) {
+      if (!fields.has(id)) fields.set(id, new Element());
+      return fields.get(id);
+    },
+    querySelector: () => panel,
+  };
+  const element = () => Object.assign(new Element(), { attachShadow: () => root });
+  class XHR { open() {} setRequestHeader() {} send() {} }
+  const window = { innerHeight: 800, addEventListener() {} };
+  window.top = window;
+  const sandbox = {
+    unsafeWindow: { XMLHttpRequest: XHR }, window, location: new URL('http://10.0.0.194:6600/'),
+    document: { title: 'M3U8', documentElement: new Element(), createElement: element, referrerPolicy: '', addEventListener() {}, querySelectorAll: () => [] },
+    navigator: { userAgent: 'fixture' }, URL, Headers, TextDecoder, setInterval() {}, setTimeout, clearTimeout,
+    GM_getValue: key => (key === 'docker-btn-bottom' ? 180 : { server: 'http://10.0.0.194:6600', secret: '123456' }),
+    GM_setValue() {}, GM_registerMenuCommand() {},
+  };
+  vm.runInNewContext(fs.readFileSync(require.resolve('../examples/scriptcat-downloader.user.js'), 'utf8'), sandbox);
+  assert.equal(root.getElementById('toggle').hidden, true);
+  assert.equal(root.getElementById('toggle').style.bottom, '180px');
+});

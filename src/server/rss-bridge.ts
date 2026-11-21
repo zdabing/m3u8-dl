@@ -8,7 +8,11 @@ import type { RssBridgeFeed, ServerConfig } from '../types/contract.js';
 
 const DEFAULT_FEED_URL = 'https://tangxinvlog.app/rss.xml';
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const MAX_DETAILS_CACHE = 500;
+const MAX_DETAILS_CACHE = 5000;
+const MAX_FEED_ITEMS = 50_000;
+const MAX_STREAM_REFS = 50_000;
+const EAGER_RESOLVE_THRESHOLD = 20;
+const DIRECT_EAGER_CAP = 50;
 const REQUEST_TIMEOUT_MS = 15_000;
 const SEGMENT_TIMEOUT_MS = 60_000;
 const FETCH_CONCURRENCY = 4;
@@ -29,11 +33,21 @@ interface ParsedRssItem {
   pageUrl: string;
   pubDate: string;
   description: string;
+  enclosureUrl?: string;
 }
 
 interface ResolvedRssItem extends ParsedRssItem {
   m3u8Url: string;
   cover: string;
+  lazy?: boolean;
+}
+
+interface StreamRef {
+  guid: string;
+  pageUrl: string;
+  title: string;
+  referer: string;
+  m3u8Url?: string;
 }
 
 interface RssChannel {
@@ -83,7 +97,7 @@ export function defaultRssBridgeFeeds(cfg: ServerConfig): RssBridgeFeed[] {
       url: String(feed.url || '').trim(),
       itemPattern: String(feed.itemPattern || '').trim(),
       referer: String(feed.referer || '').trim(),
-      limit: clampInt(feed.limit, 20, 1, 50),
+      limit: clampInt(feed.limit, 0, 0, MAX_FEED_ITEMS),
       cacheTtl: clampInt(feed.cacheTtl, 300, 0, 86400),
     }));
   }
@@ -97,7 +111,7 @@ export function defaultRssBridgeFeeds(cfg: ServerConfig): RssBridgeFeed[] {
       url: String(cfg.rssBridgeFeedUrl || '').trim() || DEFAULT_FEED_URL,
       itemPattern: '',
       referer: String(cfg.rssBridgeReferer || '').trim(),
-      limit: clampInt(cfg.rssBridgeLimit, 20, 1, 50),
+      limit: clampInt(cfg.rssBridgeLimit, 0, 0, MAX_FEED_ITEMS),
       cacheTtl: clampInt(cfg.rssBridgeCacheTtl, 300, 0, 86400),
     },
   ];
@@ -196,6 +210,7 @@ function parseRssItems(xml: string, limit: number, feedUrl: string, itemPattern:
     description: extractTag(channelHeader, 'description') || 'Trimmed HLS RSS Relay',
   };
 
+  const cap = limit > 0 ? Math.min(limit, MAX_FEED_ITEMS) : MAX_FEED_ITEMS;
   const items: ParsedRssItem[] = [];
   const itemRx = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
   let match: RegExpExecArray | null;
@@ -212,12 +227,24 @@ function parseRssItems(xml: string, limit: number, feedUrl: string, itemPattern:
         pageUrl = '';
       }
     }
+    let enclosureUrl = '';
+    const encMatch = /<enclosure\b[^>]*\burl=["']([^"']+)["']/i.exec(block);
+    if (encMatch?.[1]) {
+      try {
+        const encResolved = new URL(decodeXmlEntities(encMatch[1].trim()), feedUrl);
+        if (['http:', 'https:'].includes(encResolved.protocol) && /\.m3u8(?:\?|$)/i.test(encResolved.href)) {
+          enclosureUrl = encResolved.href;
+        }
+      } catch {
+        enclosureUrl = '';
+      }
+    }
     const guid = extractTag(block, 'guid') || pageUrl || title;
     const pubDate = extractTag(block, 'pubDate');
     const description = extractTag(block, 'description');
     if (!guid || !pageUrl || !matchesItemPattern(pageUrl, itemPattern)) continue;
-    items.push({ guid, title: title || guid, pageUrl, pubDate, description });
-    if (items.length >= limit) break;
+    items.push({ guid, title: title || guid, pageUrl, pubDate, description, ...(enclosureUrl ? { enclosureUrl } : {}) });
+    if (items.length >= cap) break;
   }
 
   return { channel, items };
@@ -236,6 +263,7 @@ function parseHtmlListItems(html: string, limit: number, listUrl: string, itemPa
     description: `${feedName || listParsed.hostname} HTML 列表订阅`,
   };
 
+  const cap = limit > 0 ? Math.min(limit, MAX_FEED_ITEMS) : MAX_FEED_ITEMS;
   const items: ParsedRssItem[] = [];
   const seenUrls = new Set<string>();
   const linkRx = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
@@ -281,7 +309,7 @@ function parseHtmlListItems(html: string, limit: number, listUrl: string, itemPa
     const title = (innerText || attrTitle || pathTail).slice(0, 160);
 
     items.push({ guid: resolved.href, title, pageUrl: resolved.href, pubDate: '', description: '' });
-    if (items.length >= limit) break;
+    if (items.length >= cap) break;
   }
 
   return { channel, items };
@@ -409,7 +437,7 @@ function renderRssXml(
   items: ResolvedRssItem[],
   options: { linkMedia: boolean; direct: boolean; publicBase: string; tokenQuery: string }
 ) {
-  const ready = items.filter(item => item.m3u8Url);
+  const ready = options.direct ? items.filter(item => item.m3u8Url) : items.filter(item => item.m3u8Url || item.lazy);
   const itemXml = ready
     .map(item => {
       const enclosureUrl = options.direct ? item.m3u8Url : buildProxyM3u8Url(options.publicBase, item, options.tokenQuery);
@@ -467,10 +495,13 @@ export class RssBridgeService {
   private cacheFile: string;
   private details: Record<string, CachedDetail> = {};
   private detailsById = new Map<string, CachedDetail & { guid: string }>();
+  private streamRefs = new Map<string, StreamRef>();
   private activeControllers = new Set<AbortController>();
   private writeQueue = Promise.resolve();
   private cachedFeeds = new Map<string, FeedSnapshot>();
   private inflightRefreshes = new Map<string, Promise<FeedSnapshot>>();
+  private inflightDetailResolves = new Map<string, Promise<(CachedDetail & { guid: string }) | null>>();
+  private lastReindexAt = 0;
   private cacheGeneration = 0;
   private closed = false;
 
@@ -502,6 +533,8 @@ export class RssBridgeService {
     this.cacheGeneration++;
     this.cachedFeeds.clear();
     this.inflightRefreshes.clear();
+    this.streamRefs.clear();
+    this.lastReindexAt = 0;
   }
 
   close() {
@@ -541,17 +574,34 @@ export class RssBridgeService {
         url,
         itemPattern: String(feed.itemPattern || '').trim(),
         referer,
-        limit: clampInt(feed.limit, 20, 1, 50),
+        limit: clampInt(feed.limit, 0, 0, MAX_FEED_ITEMS),
         cacheTtl: clampInt(feed.cacheTtl, 300, 0, 86400),
       });
     }
     return out;
   }
 
+  private registerStreamRef(id: string, ref: StreamRef) {
+    this.streamRefs.delete(id);
+    this.streamRefs.set(id, ref);
+    while (this.streamRefs.size > MAX_STREAM_REFS) {
+      const oldest = this.streamRefs.keys().next().value;
+      if (!oldest) break;
+      this.streamRefs.delete(oldest);
+    }
+  }
+
+  private coversLimit(cachedLimit: number, targetLimit: number) {
+    return cachedLimit === 0 || (targetLimit > 0 && cachedLimit >= targetLimit);
+  }
+
   private saveCache() {
     const entries = Object.entries(this.details);
     if (entries.length > MAX_DETAILS_CACHE) {
       entries.sort((a, b) => (b[1]?.fetchedAt || 0) - (a[1]?.fetchedAt || 0));
+      for (const [guid] of entries.slice(MAX_DETAILS_CACHE)) {
+        this.detailsById.delete(makeItemId(guid));
+      }
       this.details = Object.fromEntries(entries.slice(0, MAX_DETAILS_CACHE));
     }
     const content = `${JSON.stringify({ details: this.details }, null, 2)}\n`;
@@ -596,11 +646,15 @@ export class RssBridgeService {
     throw lastError;
   }
 
-  private async resolveItems(rawItems: ParsedRssItem[], referer: string) {
+  private async resolveItems(rawItems: ParsedRssItem[], referer: string, lazyMode: boolean, eagerCap = rawItems.length) {
     let updated = 0;
     let failedCount = 0;
 
-    const resolved = await mapPool(rawItems, FETCH_CONCURRENCY, async item => {
+    const resolved = await mapPool(rawItems, FETCH_CONCURRENCY, async (item, index) => {
+      const id = makeItemId(item.guid);
+      const ref: StreamRef = { guid: item.guid, pageUrl: item.pageUrl, title: item.title, referer };
+      this.registerStreamRef(id, ref);
+
       const cached = this.details[item.guid];
       if (cached?.m3u8Url) {
         const synced: CachedDetail = cached.referer === referer ? cached : { ...cached, referer };
@@ -608,16 +662,23 @@ export class RssBridgeService {
           this.details[item.guid] = synced;
           updated++;
         }
-        this.detailsById.set(makeItemId(item.guid), { guid: item.guid, ...synced });
-        return { ...item, m3u8Url: synced.m3u8Url, cover: synced.cover || '' };
+        ref.m3u8Url = synced.m3u8Url;
+        this.detailsById.set(id, { guid: item.guid, ...synced });
+        return { ...item, m3u8Url: synced.m3u8Url, cover: synced.cover || '', lazy: false };
       }
 
-      if (/\.m3u8(?:\?|$)/i.test(item.pageUrl)) {
-        const detail: CachedDetail = { m3u8Url: item.pageUrl, title: item.title, cover: '', referer, fetchedAt: Date.now() };
+      const directMedia = item.enclosureUrl || (/\.m3u8(?:\?|$)/i.test(item.pageUrl) ? item.pageUrl : '');
+      if (directMedia) {
+        const detail: CachedDetail = { m3u8Url: directMedia, title: item.title, cover: '', referer, fetchedAt: Date.now() };
+        ref.m3u8Url = directMedia;
         this.details[item.guid] = detail;
-        this.detailsById.set(makeItemId(item.guid), { guid: item.guid, ...detail });
+        this.detailsById.set(id, { guid: item.guid, ...detail });
         updated++;
-        return { ...item, m3u8Url: item.pageUrl, cover: '' };
+        return { ...item, m3u8Url: directMedia, cover: '', lazy: false };
+      }
+
+      if (lazyMode || index >= eagerCap) {
+        return { ...item, m3u8Url: '', cover: '', lazy: true };
       }
 
       try {
@@ -629,17 +690,18 @@ export class RssBridgeService {
         const m3u8Url = extractM3u8FromHtml(html, item.pageUrl);
         if (!m3u8Url) {
           failedCount++;
-          return { ...item, m3u8Url: '', cover: '' };
+          return { ...item, m3u8Url: '', cover: '', lazy: false };
         }
         const cover = extractCoverFromHtml(html, item.pageUrl);
         const detail: CachedDetail = { m3u8Url, title: item.title, cover, referer, fetchedAt: Date.now() };
+        ref.m3u8Url = m3u8Url;
         this.details[item.guid] = detail;
-        this.detailsById.set(makeItemId(item.guid), { guid: item.guid, ...detail });
+        this.detailsById.set(id, { guid: item.guid, ...detail });
         updated++;
-        return { ...item, m3u8Url, cover };
+        return { ...item, m3u8Url, cover, lazy: false };
       } catch {
         failedCount++;
-        return { ...item, m3u8Url: '', cover: '' };
+        return { ...item, m3u8Url: '', cover: '', lazy: false };
       }
     });
 
@@ -647,21 +709,24 @@ export class RssBridgeService {
     return { resolved, failedCount };
   }
 
-  private async getOrRefreshFeed(feed: EffectiveFeed, targetLimit: number, forceRefresh: boolean) {
-    const effectiveLimit = Math.max(feed.limit, targetLimit);
+  private async getOrRefreshFeed(feed: EffectiveFeed, targetLimit: number, forceRefresh: boolean, directMode = false) {
+    const effectiveLimit = feed.limit === 0 || targetLimit === 0 ? 0 : Math.max(feed.limit, targetLimit);
     const now = Date.now();
     const cached = this.cachedFeeds.get(feed.id);
+    const hasUnresolvedLazy = directMode && Boolean(cached?.items.some(item => item.lazy && !item.m3u8Url));
     const isFresh =
       cached &&
+      !hasUnresolvedLazy &&
       now - cached.fetchedAt < feed.cacheTtl * 1000 &&
-      cached.requestedLimit >= targetLimit &&
+      this.coversLimit(cached.requestedLimit, targetLimit) &&
       cached.feedUrl === feed.url &&
       cached.mode === feed.mode &&
       cached.itemPattern === feed.itemPattern &&
       cached.referer === feed.referer;
 
     if (!forceRefresh && isFresh) return cached;
-    const inflight = this.inflightRefreshes.get(feed.id);
+    const inflightKey = `${feed.id}:${directMode ? 'd' : 'p'}`;
+    const inflight = this.inflightRefreshes.get(inflightKey);
     if (inflight) return inflight;
 
     const generation = this.cacheGeneration;
@@ -683,7 +748,9 @@ export class RssBridgeService {
         feed.mode === 'html'
           ? parseHtmlListItems(body, effectiveLimit, feed.url, feed.itemPattern, feed.name)
           : parseRssItems(body, effectiveLimit, feed.url, feed.itemPattern);
-      const { resolved, failedCount } = await this.resolveItems(parsed.items, feed.referer);
+      const lazyMode = !directMode && parsed.items.length > EAGER_RESOLVE_THRESHOLD;
+      const eagerCap = directMode && parsed.items.length > DIRECT_EAGER_CAP ? DIRECT_EAGER_CAP : parsed.items.length;
+      const { resolved, failedCount } = await this.resolveItems(parsed.items, feed.referer, lazyMode, eagerCap);
       const snapshot: FeedSnapshot = {
         channel: parsed.channel,
         items: resolved,
@@ -701,12 +768,85 @@ export class RssBridgeService {
       return snapshot;
     })();
 
-    this.inflightRefreshes.set(feed.id, promise);
+    this.inflightRefreshes.set(inflightKey, promise);
     try {
       return await promise;
     } finally {
-      if (this.inflightRefreshes.get(feed.id) === promise) {
-        this.inflightRefreshes.delete(feed.id);
+      if (this.inflightRefreshes.get(inflightKey) === promise) {
+        this.inflightRefreshes.delete(inflightKey);
+      }
+    }
+  }
+
+  private async ensureStreamEntry(id: string): Promise<(CachedDetail & { guid: string }) | null> {
+    const existing = this.detailsById.get(id);
+    if (existing?.m3u8Url) return existing;
+
+    let ref = this.streamRefs.get(id);
+    if (!ref && Date.now() - this.lastReindexAt > 30_000) {
+      this.lastReindexAt = Date.now();
+      const feeds = this.resolveFeedList().filter(feed => feed.enabled);
+      for (const feed of feeds) {
+        try {
+          await this.getOrRefreshFeed(feed, feed.limit, false, false);
+        } catch {
+          /* Ignore individual feed refresh errors during lazy reindex. */
+        }
+        ref = this.streamRefs.get(id);
+        if (ref) break;
+      }
+    }
+    if (!ref) return null;
+    if (ref.m3u8Url) {
+      return { guid: ref.guid, m3u8Url: ref.m3u8Url, title: ref.title, referer: ref.referer, fetchedAt: Date.now() };
+    }
+
+    const inflight = this.inflightDetailResolves.get(id);
+    if (inflight) return inflight;
+
+    const resolvePromise = (async (): Promise<(CachedDetail & { guid: string }) | null> => {
+      const cached = this.details[ref.guid];
+      if (cached?.m3u8Url) {
+        const synced: CachedDetail = cached.referer === ref.referer ? cached : { ...cached, referer: ref.referer };
+        if (cached.referer !== ref.referer) {
+          this.details[ref.guid] = synced;
+          await this.saveCache();
+        }
+        const entry = { guid: ref.guid, ...synced };
+        ref.m3u8Url = synced.m3u8Url;
+        this.detailsById.set(id, entry);
+        return entry;
+      }
+
+      const html = await this.fetchText(ref.pageUrl, {
+        'user-agent': DEFAULT_UA,
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        referer: ref.referer,
+      });
+      const m3u8Url = extractM3u8FromHtml(html, ref.pageUrl);
+      if (!m3u8Url) return null;
+      const cover = extractCoverFromHtml(html, ref.pageUrl);
+      const detail: CachedDetail = {
+        m3u8Url,
+        title: ref.title,
+        cover,
+        referer: ref.referer,
+        fetchedAt: Date.now(),
+      };
+      const entry = { guid: ref.guid, ...detail };
+      ref.m3u8Url = m3u8Url;
+      this.details[ref.guid] = detail;
+      this.detailsById.set(id, entry);
+      await this.saveCache();
+      return entry;
+    })();
+
+    this.inflightDetailResolves.set(id, resolvePromise);
+    try {
+      return await resolvePromise;
+    } finally {
+      if (this.inflightDetailResolves.get(id) === resolvePromise) {
+        this.inflightDetailResolves.delete(id);
       }
     }
   }
@@ -800,12 +940,12 @@ export class RssBridgeService {
     tokenQuery: string
   ) {
     try {
-      const reqLimit = clampInt(req.query.limit, feed.limit, 1, 50);
+      const reqLimit = req.query.limit !== undefined ? clampInt(req.query.limit, feed.limit, 0, MAX_FEED_ITEMS) : feed.limit;
       const forceRefresh = req.query.refresh === '1';
       const linkMedia = req.query.link === 'media';
       const direct = req.query.direct === '1';
-      const data = await this.getOrRefreshFeed(feed, reqLimit, forceRefresh);
-      const items = data.items.slice(0, reqLimit);
+      const data = await this.getOrRefreshFeed(feed, reqLimit, forceRefresh, direct);
+      const items = reqLimit > 0 ? data.items.slice(0, reqLimit) : data.items;
 
       if (format === 'json') {
         sendJson(res, 200, {
@@ -813,14 +953,16 @@ export class RssBridgeService {
           feed: { id: feed.id, name: feed.name, mode: feed.mode },
           channel: data.channel,
           fetchedAt: new Date(data.fetchedAt).toISOString(),
-          count: items.filter(it => it.m3u8Url).length,
+          count: items.filter(it => it.m3u8Url || it.lazy).length,
+          resolvedCount: items.filter(it => it.m3u8Url).length,
           failedCount: data.failedCount,
           items: items.map(it => ({
             guid: it.guid,
             title: it.title,
             pageUrl: it.pageUrl,
             m3u8Url: it.m3u8Url,
-            proxyM3u8Url: it.m3u8Url ? buildProxyM3u8Url(publicBase, it, tokenQuery) : '',
+            proxyM3u8Url: it.m3u8Url || it.lazy ? buildProxyM3u8Url(publicBase, it, tokenQuery) : '',
+            lazy: Boolean(it.lazy && !it.m3u8Url),
             cover: it.cover,
             pubDate: it.pubDate,
             referer: feed.referer,
@@ -894,6 +1036,7 @@ export class RssBridgeService {
         }),
         cachedDetails: Object.keys(this.details).length,
         indexedStreams: this.detailsById.size,
+        indexedRefs: this.streamRefs.size,
       });
       return;
     }
@@ -901,7 +1044,13 @@ export class RssBridgeService {
     const hlsMatch = /^\/hls\/([0-9a-f]{16})\/(.+)$/i.exec(path);
     if (hlsMatch) {
       const id = hlsMatch[1].toLowerCase();
-      const entry = this.detailsById.get(id);
+      let entry: (CachedDetail & { guid: string }) | null;
+      try {
+        entry = await this.ensureStreamEntry(id);
+      } catch (err) {
+        sendJson(res, 502, { ok: false, error: (err as Error)?.message || '上游详情页解析失败' });
+        return;
+      }
       if (!entry?.m3u8Url) {
         sendJson(res, 404, { ok: false, error: 'Stream not found' });
         return;
@@ -949,7 +1098,13 @@ export class RssBridgeService {
     const subMatch = /^\/hls-sub\/([0-9a-f]{16})$/i.exec(path);
     if (subMatch) {
       const id = subMatch[1].toLowerCase();
-      const entry = this.detailsById.get(id);
+      let entry: (CachedDetail & { guid: string }) | null;
+      try {
+        entry = await this.ensureStreamEntry(id);
+      } catch (err) {
+        sendJson(res, 502, { ok: false, error: (err as Error)?.message || '上游详情页解析失败' });
+        return;
+      }
       if (!entry?.m3u8Url) {
         sendJson(res, 404, { ok: false, error: 'Stream not found' });
         return;

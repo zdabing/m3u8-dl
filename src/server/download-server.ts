@@ -33,6 +33,11 @@ function validateHttpHref(raw: unknown, label: string, required = true) {
   return parsed.href;
 }
 
+function parseRssLimitEnv(raw?: string) {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isInteger(parsed) ? Math.min(50_000, Math.max(0, parsed)) : 0;
+}
+
 function validateRssFeeds(input: unknown): RssBridgeFeed[] {
   if (!Array.isArray(input) || input.length > 30) throw new Error('订阅源列表最多支持 30 个');
   const seen = new Set<string>();
@@ -51,7 +56,8 @@ function validateRssFeeds(input: unknown): RssBridgeFeed[] {
     const itemPattern = typeof item.itemPattern === 'string' ? item.itemPattern.trim() : '';
     if (itemPattern.length > 200) throw new Error(`订阅源 ${id} 链接筛选词最多 200 个字符`);
     const referer = item.referer === undefined ? '' : validateHttpHref(item.referer, `订阅源 ${id} Referer`, false);
-    if (!Number.isInteger(item.limit) || item.limit < 1 || item.limit > 50) throw new Error(`订阅源 ${id} 保留条数应为 1–50`);
+    if (!Number.isInteger(item.limit) || item.limit < 0 || item.limit > 50_000)
+      throw new Error(`订阅源 ${id} 保留条数应为 0–50000（0 表示全部）`);
     if (!Number.isInteger(item.cacheTtl) || item.cacheTtl < 0 || item.cacheTtl > 86400)
       throw new Error(`订阅源 ${id} 缓存时长应为 0–86400 秒`);
     return { id, name, enabled: item.enabled, mode: item.mode, url, itemPattern, referer, limit: item.limit, cacheTtl: item.cacheTtl };
@@ -83,7 +89,7 @@ export class DLServer {
   private saveTimer: NodeJS.Timeout;
   private broadcastTimer: NodeJS.Timeout;
   private writeQueue = Promise.resolve();
-  private version = '1.10.0';
+  private version = '1.11.0';
   private closing = false;
   private extractions = new Set<AbortController>();
   private rssBridge: RssBridgeService;
@@ -100,7 +106,7 @@ export class DLServer {
     noProxy: process.env.DS_NO_PROXY || '',
     rssBridgeEnabled: ['1', 'true', 'yes'].includes(String(process.env.DS_RSS_BRIDGE_ENABLED || '').toLowerCase()),
     rssBridgeFeedUrl: process.env.DS_RSS_BRIDGE_FEED_URL || 'https://tangxinvlog.app/rss.xml',
-    rssBridgeLimit: Math.min(50, Math.max(1, Number.parseInt(process.env.DS_RSS_BRIDGE_LIMIT || '20', 10) || 20)),
+    rssBridgeLimit: parseRssLimitEnv(process.env.DS_RSS_BRIDGE_LIMIT),
     rssBridgeReferer: process.env.DS_RSS_BRIDGE_REFERER || '',
     rssBridgeCacheTtl: Math.min(86400, Math.max(0, Number.parseInt(process.env.DS_RSS_BRIDGE_CACHE_TTL || '300', 10) || 300)),
   };
@@ -129,7 +135,8 @@ export class DLServer {
       if (typeof this.cfg.headers !== 'string') this.cfg.headers = JSON.stringify(this.cfg.headers);
       this.cfg.maxDownloads = Math.min(5, Math.max(1, Number(this.cfg.maxDownloads) || 2));
       this.cfg.rssBridgeEnabled = Boolean(this.cfg.rssBridgeEnabled);
-      this.cfg.rssBridgeLimit = Math.min(50, Math.max(1, Number(this.cfg.rssBridgeLimit) || 20));
+      const rssLimit = Number(this.cfg.rssBridgeLimit);
+      this.cfg.rssBridgeLimit = Number.isInteger(rssLimit) ? Math.min(50_000, Math.max(0, rssLimit)) : 0;
       const rssTtl = Number(this.cfg.rssBridgeCacheTtl);
       this.cfg.rssBridgeCacheTtl = Number.isInteger(rssTtl) ? Math.min(86400, Math.max(0, rssTtl)) : 300;
       this.cfg.rssBridgeFeeds = defaultRssBridgeFeeds({
@@ -426,8 +433,8 @@ export class DLServer {
           next.rssBridgeCacheTtl = primary.cacheTtl;
         }
       } else {
-        if (!Number.isInteger(next.rssBridgeLimit) || next.rssBridgeLimit < 1 || next.rssBridgeLimit > 50)
-          throw new Error('RSS 条目上限应为 1–50');
+        if (!Number.isInteger(next.rssBridgeLimit) || next.rssBridgeLimit < 0 || next.rssBridgeLimit > 50_000)
+          throw new Error('RSS 条目上限应为 0–50000（0 表示全部）');
         if (!Number.isInteger(next.rssBridgeCacheTtl) || next.rssBridgeCacheTtl < 0 || next.rssBridgeCacheTtl > 86400)
           throw new Error('RSS 缓存时长应为 0–86400 秒');
         next.rssBridgeFeedUrl = validateHttpHref(next.rssBridgeFeedUrl, '上游 RSS 地址', Boolean(next.rssBridgeEnabled));

@@ -1,6 +1,6 @@
 {
   "name": "@lzwme/m3u8-dl",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Lightweight M3U8 batch downloader with resumable downloads, mobile WebUI and lossless merging.",
   "main": "cjs/index.js",
   "types": "cjs/index.d.ts",

@@ -402,3 +402,130 @@ test('RSS bridge supports multi-feed RSS + HTML list mode with per-feed Referer 
   });
   assert.equal(badUrlRes.status, 400);
 });
+
+test('RSS bridge supports unlimited (0) and >50 feeds via lazy on-demand detail resolution', async t => {
+  let server;
+  t.after(() => server?.close());
+  const dir = await temporary(t);
+
+  let upstreamOrigin = '';
+  const detailRequests = new Map();
+  const cdnSeen = [];
+  const keyPayload = Buffer.alloc(16, 0xef);
+  const segPayload = Buffer.from('lazy-segment-bytes');
+
+  const cdnOrigin = await serve(t, (req, res) => {
+    cdnSeen.push({ url: req.url, referer: req.headers.referer });
+    if (req.headers.referer !== `${upstreamOrigin}/`) {
+      res.writeHead(403).end('Missing Referer');
+      return;
+    }
+    if (/^\/videos\/item-\d+\/index\.m3u8$/.test(req.url)) {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="enc.key"\n#EXTINF:2.0,\nseg0.ts\n#EXT-X-ENDLIST\n');
+      return;
+    }
+    if (/^\/videos\/item-\d+\/enc\.key$/.test(req.url)) {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(keyPayload);
+      return;
+    }
+    if (/^\/videos\/item-\d+\/seg0\.ts$/.test(req.url)) {
+      res.writeHead(200, { 'content-type': 'video/mp2t' }).end(segPayload);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  upstreamOrigin = await serve(t, (req, res) => {
+    if (req.url === '/rss.xml') {
+      const itemsXml = Array.from({ length: 60 }, (_, idx) => {
+        const n = idx + 1;
+        return `<item><title>视频 ${n}</title><link>${upstreamOrigin}/v/item-${n}</link><guid>${upstreamOrigin}/v/item-${n}</guid></item>`;
+      }).join('\n');
+      res.writeHead(200, { 'content-type': 'application/xml; charset=utf-8' });
+      res.end(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Large Feed</title><link>${upstreamOrigin}/</link><description>Large</description>${itemsXml}</channel></rss>`);
+      return;
+    }
+    const detailMatch = /^\/v\/(item-\d+)$/.exec(req.url);
+    if (detailMatch) {
+      const slug = detailMatch[1];
+      detailRequests.set(slug, (detailRequests.get(slug) || 0) + 1);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<html><body><script>const url="${cdnOrigin}/videos/${slug}/index.m3u8";</script></body></html>`);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  server = new DLServer({ port: 0, cacheDir: path.join(dir, 'cache') });
+  await server.ready;
+  const base = `http://127.0.0.1:${server.server.address().port}`;
+
+  const saveZeroRes = await fetch(`${base}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      rssBridgeEnabled: true,
+      rssBridgeFeeds: [
+        {
+          id: 'large',
+          name: '大站订阅',
+          enabled: true,
+          mode: 'rss',
+          url: `${upstreamOrigin}/rss.xml`,
+          itemPattern: '',
+          referer: '',
+          limit: 0,
+          cacheTtl: 60,
+        },
+      ],
+    }),
+  });
+  assert.equal(saveZeroRes.status, 200);
+
+  // Returns all 60 items without scraping all 60 detail pages upfront
+  const xmlRes = await fetch(`${base}/rss-bridge/feeds/large.xml`);
+  assert.equal(xmlRes.status, 200);
+  const xml = await xmlRes.text();
+  const enclosures = [...xml.matchAll(/<enclosure url="([^"]+)" type="application\/vnd\.apple\.mpegurl" length="0" \/>/g)].map(m => m[1]);
+  assert.equal(enclosures.length, 60);
+  assert.equal(detailRequests.size, 0);
+
+  // Fetch item #55 -> triggers on-demand detail resolution + Referer proxy
+  const item55Url = enclosures[54];
+  const m3u8Res = await fetch(item55Url);
+  assert.equal(m3u8Res.status, 200);
+  const playlist = await m3u8Res.text();
+  assert.match(playlist, /^#EXTM3U/);
+  assert.match(playlist, /URI="enc\.key"/);
+  assert.match(playlist, /seg0\.ts/);
+  assert.equal(detailRequests.get('item-55'), 1);
+
+  assert.deepEqual(Buffer.from(await (await fetch(new URL('enc.key', item55Url))).arrayBuffer()), keyPayload);
+  assert.deepEqual(Buffer.from(await (await fetch(new URL('seg0.ts', item55Url))).arrayBuffer()), segPayload);
+  assert.ok(cdnSeen.length >= 3);
+  assert.ok(cdnSeen.every(entry => entry.referer === `${upstreamOrigin}/`));
+
+  // Subsequent fetch uses cached detail rather than re-fetching HTML
+  assert.equal((await fetch(item55Url)).status, 200);
+  assert.equal(detailRequests.get('item-55'), 1);
+
+  // Accepts >50 limits and rejects negative limits
+  const save200Res = await fetch(`${base}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      rssBridgeFeeds: [{ id: 'large', name: '大站订阅', enabled: true, mode: 'rss', url: `${upstreamOrigin}/rss.xml`, limit: 200, cacheTtl: 60 }],
+    }),
+  });
+  assert.equal(save200Res.status, 200);
+
+  const badNegRes = await fetch(`${base}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      rssBridgeFeeds: [{ id: 'large', name: '大站订阅', enabled: true, mode: 'rss', url: `${upstreamOrigin}/rss.xml`, limit: -1, cacheTtl: 60 }],
+    }),
+  });
+  assert.equal(badNegRes.status, 400);
+});
